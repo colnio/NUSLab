@@ -2,98 +2,21 @@ import sys
 import numpy as np
 import csv
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox)
 from PyQt5.QtCore import QTimer, QElapsedTimer
-import numpy as np
 from scipy.fft import fft
-
+from pymeasure.instruments.keithley import Keithley6517B
 import random 
-class SimulatedKeithley6517B:
-    def __init__(self, mode='resistor', resistance=1e3, diode_is=1e-6, diode_n=1, temperature=300):
-        """
-        Initialize the simulated instrument.
-        :param mode: 'resistor' or 'diode'
-        :param resistance: Resistance value in Ohms (for resistor mode)
-        :param diode_is: Saturation current (for diode mode)
-        :param diode_n: Ideality factor (for diode mode)
-        :param temperature: Temperature in Kelvin (for diode mode)
-        """
-        self.mode = mode
-        self.resistance = resistance  # Ohms, used in resistor mode
-        self.diode_is = diode_is      # Saturation current, used in diode mode
-        self.diode_n = diode_n        # Ideality factor, used in diode mode
-        self.temperature = temperature  # Temperature in Kelvin for diode mode
-        self.voltage = 0.0  # Voltage applied
-        self.current = 0.0  # Current measured
-        self.noise = 10
-
-    def set_voltage(self, voltage):
-        """
-        Sets the applied voltage.
-        :param voltage: Voltage in Volts
-        """
-        self.voltage = voltage
-        self._update_current()
-
-    def measure_current(self):
-        """
-        Returns the current based on the applied voltage and component type (resistor/diode).
-        :return: Measured current in Amps
-        """
-        return self.current * (1 + self.noise * random.random())
-
-    def _update_current(self):
-        """
-        Updates the current based on the applied voltage and the component type.
-        """
-        if self.mode == 'resistor':
-            # Ohm's law for resistor: I = V / R
-            self.current = self.voltage / self.resistance
-        elif self.mode == 'diode':
-            # Shockley diode equation: I = I_s * (exp(V / (n * V_T)) - 1)
-            V_T = 8.617333262e-5 * self.temperature  # Thermal voltage in Volts
-            self.current = self.diode_is * (np.exp(self.voltage / (self.diode_n * V_T)) - 1)
-
-    def get_voltage(self):
-        """
-        Returns the applied voltage.
-        :return: Voltage in Volts
-        """
-        return self.voltage
-
-    def configure_current_range(self, current_range):
-        """
-        Simulate configuring the current range (stub function for compatibility).
-        :param current_range: Current range value
-        """
-        pass
-
-    def configure_voltage_source(self, voltage):
-        """
-        Simulate configuring the voltage source (stub function for compatibility).
-        :param voltage: Voltage value
-        """
-        self.set_voltage(voltage)
-
-    def enable_output(self):
-        """
-        Simulate enabling the output (stub function for compatibility).
-        """
-        pass
-
-    def disable_output(self):
-        """
-        Simulate disabling the output (stub function for compatibility).
-        """
-        self.set_voltage(0)
-        self.current = 0.0
+from pymeasure.instruments.resources import list_resources
+import time 
 
 class MeasurementSimulator(QWidget):
     def __init__(self):
         super().__init__()
 
         # Initialize simulation variables
-        self.device = SimulatedKeithley6517B(mode='diode', resistance=1e3)
+        self.device = Keithley6517B('GPIB0::27::INSTR')
+        self.device_address = ''
         self.voltage_min = 0
         self.voltage_max = 1
         self.compliance_current = 1e-3
@@ -117,6 +40,12 @@ class MeasurementSimulator(QWidget):
         self.setWindowTitle('Simulated Keithley 6517B')
         layout = QVBoxLayout()
 
+
+        # keithley 
+        # device_address_layout = QHBoxLayout()
+        self.devce_address_input = QComboBox()
+        self.devce_address_input.addItems(list(list_resources()))
+        layout.addWidget(self.devce_address_input)
         # Voltage range input
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
@@ -152,8 +81,8 @@ class MeasurementSimulator(QWidget):
         # Compliance current input
         compliance_layout = QHBoxLayout()
         self.compliance_input = QDoubleSpinBox()
-        self.compliance_input.setRange(1e-9, 1)
-        self.compliance_input.setValue(1e-3)
+        self.compliance_input.setRange(1e-11, 1e11)
+        self.compliance_input.setValue(1e-9)
         compliance_layout.addWidget(QLabel('Compliance current (A):'))
         compliance_layout.addWidget(self.compliance_input)
         layout.addLayout(compliance_layout)
@@ -161,7 +90,7 @@ class MeasurementSimulator(QWidget):
         # Collection time input
         collection_time_layout = QHBoxLayout()
         self.collection_time_input = QSpinBox()
-        self.collection_time_input.setRange(10, 5000)  # Time in ms
+        self.collection_time_input.setRange(1, 5000)  # Time in ms
         self.collection_time_input.setValue(1000)
         collection_time_layout.addWidget(QLabel('Collection time (ms):'))
         collection_time_layout.addWidget(self.collection_time_input)
@@ -213,6 +142,9 @@ class MeasurementSimulator(QWidget):
         self.compliance_current = self.compliance_input.value()
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
+        self.device_address = self.devce_address_input.currentText
+        self.device = Keithley6517B('GPIB0::27::INSTR')
+        time.sleep(1000)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
@@ -227,10 +159,16 @@ class MeasurementSimulator(QWidget):
         self.noise_plot.clear()
 
     def stop_measurement(self):
+        self.current_voltage = 0
+        self.device.shutdown()
         self.timer.stop()
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
+        # self.device.source_voltage = 0
+        self.device.enable_source()
+        self.device.apply_voltage(voltage_range=5)
+        self.device.measure_current(nplc=1, current=min(self.compliance_current, 21e-3), auto_range=True)
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
@@ -239,8 +177,8 @@ class MeasurementSimulator(QWidget):
 
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
-            self.device.set_voltage(self.current_voltage)
-            current = self.device.measure_current()
+            self.device.ramp_to_voltage(self.current_voltage)
+            current = self.device.current
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
@@ -253,7 +191,7 @@ class MeasurementSimulator(QWidget):
 
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
-            self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
+            self.device.ramp_to_voltage(0)  # Set voltage to 0 if compliance exceeded
             self.timer.stop()
 
         # Store the data (voltage, average current)
@@ -275,8 +213,8 @@ class MeasurementSimulator(QWidget):
             self.n_runs -= 1
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step:
             self.current_voltage = 0
-            self.device.set_voltage(0)
-            self.timer.stop()
+            self.device.ramp_to_voltage(0)
+            self.stop_measurement()
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
