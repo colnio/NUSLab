@@ -10,8 +10,13 @@ class Keithley6517B:
         self.init_device()
         
     def init_device(self):
-        self.device.write('*RST')
-        self.device.write("SYST:ZCH OFF")
+        self.device.write('*CLS;')
+        # self.device.write('*RST;')
+        # self.device.write(':TRAC:FEED:CONT NEV;*RST')
+        # selg.de
+        # self.device.write('*ESE 60;*SRE 48;*CLS;:FORM:DATA ASC;:FORM:ELEM READ,RNUM,CHAN,TST,UNIT;:SYST:TST:TYPE RTCL;')
+        self.device.write("SYST:ZCH OFF;")
+        self.device.write(":SENS:FUNC 'CURR';")
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -22,7 +27,7 @@ class Keithley6517B:
         Set the voltage range.
         :param range_value: Voltage range in volts (e.g., 10, 100, 200).
         """
-        self.device.write(f'VOLT:DC:RANG {range_value}')
+        self.device.write(f'VOLT:DC:RANG {range_value};')
         print(f"Voltage range set to {range_value} V")
 
     def set_current_range(self, range_value):
@@ -30,7 +35,7 @@ class Keithley6517B:
         Set the current range.
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
-        self.device.write(f'CURR:RANG {range_value}')
+        self.device.write(f'CURR:RANG {range_value};')
         print(f"Current range set to {range_value} A")
 
     def set_voltage(self, voltage_value):
@@ -38,17 +43,20 @@ class Keithley6517B:
         Set the output voltage.
         :param voltage_value: Voltage to set (in volts).
         """
-        self.device.write(f'VOLT {voltage_value}')
+        self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
         self.device.write('OUTP ON')  # Turn the output on
         print(f"Voltage set to {voltage_value} V and output enabled")
 
-    def read_current(self):
+    def read_current(self, autorange=False):
         """
         Read the current from the input.
         :return: The measured current (in amps).
         """
-        self.device.write('MEAS:CURR?')
-        current_value = self.device.read()
+        if autorange:
+            self.device.write('MEAS:CURR?;')
+        else:
+            self.device.write(':READ?;')
+        current_value = self.device.read().split(',')[0][:-4:]
         return float(current_value)
 
     def continuous_current_read(self, delay=1):
