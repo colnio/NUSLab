@@ -1,5 +1,7 @@
 import pyvisa
 import time
+import logging
+import pandas as pd
 
 class Keithley6517B:
     def __init__(self, gpib_address='27'):
@@ -8,6 +10,7 @@ class Keithley6517B:
         self.device.timeout = 5000  # Timeout for commands, can be adjusted if needed
         self.clear_buffer()
         self.init_device()
+        # self.log = logging.getLogger()
         
     def init_device(self):
         self.device.write('*CLS;')
@@ -17,6 +20,7 @@ class Keithley6517B:
         # self.device.write('*ESE 60;*SRE 48;*CLS;:FORM:DATA ASC;:FORM:ELEM READ,RNUM,CHAN,TST,UNIT;:SYST:TST:TYPE RTCL;')
         self.device.write("SYST:ZCH OFF;")
         self.device.write(":SENS:FUNC 'CURR';")
+        self.device.write(":SENS:CURR:NPLC 10")
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -45,7 +49,14 @@ class Keithley6517B:
         """
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
         self.device.write('OUTP ON')  # Turn the output on
-        print(f"Voltage set to {voltage_value} V and output enabled")
+        # print(f"Voltage set to {voltage_value} V and output enabled")
+
+    def disable_output(self):
+        """
+        Set the output voltage.
+        :param voltage_value: Voltage to set (in volts).
+        """
+        self.device.write('OUTP OFF')  # Turn the output on
 
     def read_current(self, autorange=False):
         """
@@ -74,6 +85,7 @@ class Keithley6517B:
 
     def close(self):
         """Close the GPIB connection."""
+        self.set_voltage(0)
         self.device.write('OUTP OFF')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6517B closed.")

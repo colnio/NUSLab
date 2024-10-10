@@ -1,30 +1,40 @@
+from cProfile import label
 import sys
 import numpy as np
 import csv
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 from scipy.fft import fft
-from pymeasure.instruments.keithley import Keithley6517B
+# from pymeasure.instruments.keithley import Keithley6517B
+import keithley
 import random 
+import pandas as pd
 from pymeasure.instruments.resources import list_resources
 import time 
+import datetime
+import matplotlib.pyplot as plt
+import os.path as op
+import os 
 
 class MeasurementSimulator(QWidget):
     def __init__(self):
         super().__init__()
 
         # Initialize simulation variables
-        self.device = Keithley6517B('GPIB0::27::INSTR')
+        self.device = None
+        self.sample_name = ''
+        # self.device = keithley.Keithley6517B('GPIB0::27::INSTR')
         self.device_address = ''
         self.voltage_min = 0
         self.voltage_max = 1
         self.compliance_current = 1e-3
         self.voltage_step = 0.1
-        self.collection_time = 1000  # in milliseconds
+        self.collection_time = 10  # in milliseconds
         self.measurements = []
         self.noise_data = []  # For storing I(t) during measurements
         self.n_runs = 2
+        self.current_range = 1e-8
         # Setup GUI components
         self.initUI()
         self.direction = 1
@@ -35,17 +45,37 @@ class MeasurementSimulator(QWidget):
 
         # Timer for signal integration
         self.elapsed_timer = QElapsedTimer()
+        # date & make folder
+        self.date = str(datetime.date.today())
+        if op.exists(self.date) == False:
+            os.makedirs(self.date)
 
     def initUI(self):
-        self.setWindowTitle('Simulated Keithley 6517B')
+        self.setWindowTitle('Keithley 6517B IV')
         layout = QVBoxLayout()
 
 
         # keithley 
-        # device_address_layout = QHBoxLayout()
+        device_address_layout = QHBoxLayout()
         self.devce_address_input = QComboBox()
-        self.devce_address_input.addItems(list(list_resources()))
-        layout.addWidget(self.devce_address_input)
+        # self.devce_address_input.addItems(list(list_resources()))
+        self.devce_address_input.addItems(['dev 1', 'dev 2'])
+        device_address_layout.addWidget(QLabel('Device address:'))
+        device_address_layout.addWidget(self.devce_address_input)
+        layout.addLayout(device_address_layout)
+        # sample name
+        sample_name_layout = QHBoxLayout()
+        self.sample_name_input = QLineEdit()
+        sample_name_layout.addWidget(QLabel('Sample name:'))
+        sample_name_layout.addWidget(self.sample_name_input)
+        layout.addLayout(sample_name_layout)
+        # Current range input
+        current_range_layout = QHBoxLayout()
+        self.current_range_input = QComboBox()
+        self.current_range_input.addItems((2 * 10.0**np.arange(-12.0, -4.0, 1.0)).astype(str))
+        current_range_layout.addWidget(QLabel('Current range (A):'))
+        current_range_layout.addWidget(self.current_range_input)
+        layout.addLayout(current_range_layout)
         # Voltage range input
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
@@ -63,8 +93,8 @@ class MeasurementSimulator(QWidget):
         # Voltage step input
         voltage_step_layout = QHBoxLayout()
         self.voltage_step_input = QDoubleSpinBox()
-        self.voltage_step_input.setRange(0.001, 1)
-        self.voltage_step_input.setValue(0.1)
+        self.voltage_step_input.setRange(0.0001, 1)
+        self.voltage_step_input.setValue(0.01)
         voltage_step_layout.addWidget(QLabel('Voltage step (V):'))
         voltage_step_layout.addWidget(self.voltage_step_input)
         layout.addLayout(voltage_step_layout)
@@ -117,7 +147,7 @@ class MeasurementSimulator(QWidget):
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
 
         # Noise plot
-        self.noise_plot = self.plot_widget.addPlot(title="Noise (I(t)) or FFT")
+        # self.noise_plot = self.plot_widget.addPlot(title="Noise (I(t)) or FFT")
 
         layout.addWidget(self.plot_widget)
 
@@ -129,9 +159,9 @@ class MeasurementSimulator(QWidget):
         self.proxy = pg.SignalProxy(self.iv_plot.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
 
         # Button to export to CSV
-        self.export_button = QPushButton('Export to CSV')
-        self.export_button.clicked.connect(self.export_to_csv)
-        layout.addWidget(self.export_button)
+        # self.export_button = QPushButton('Export to CSV')
+        # self.export_button.clicked.connect(self.export_to_csv)
+        # layout.addWidget(self.export_button)
 
         self.setLayout(layout)
 
@@ -143,7 +173,8 @@ class MeasurementSimulator(QWidget):
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.devce_address_input.currentText
-        self.device = Keithley6517B('GPIB0::27::INSTR')
+        self.sample_name = self.sample_name_input.text()
+        self.device = keithley.Keithley6517B(self.device_address)
         time.sleep(1000)
         # Clear previous measurements and noise data
         self.measurements = []
@@ -160,15 +191,16 @@ class MeasurementSimulator(QWidget):
 
     def stop_measurement(self):
         self.current_voltage = 0
-        self.device.shutdown()
+        self.device.set_voltage(0)
+        self.device.disable_output()
         self.timer.stop()
+        self.make_plot()
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
-        # self.device.source_voltage = 0
-        self.device.enable_source()
-        self.device.apply_voltage(voltage_range=5)
-        self.device.measure_current(nplc=1, current=min(self.compliance_current, 21e-3), auto_range=True)
+
+        self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
+        self.device.set_current_range(self.current_range)
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
@@ -177,8 +209,8 @@ class MeasurementSimulator(QWidget):
 
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
-            self.device.ramp_to_voltage(self.current_voltage)
-            current = self.device.current
+            self.device.set_voltage(self.current_voltage)
+            current = self.device.read_current(autorange=False)
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
@@ -191,11 +223,11 @@ class MeasurementSimulator(QWidget):
 
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
-            self.device.ramp_to_voltage(0)  # Set voltage to 0 if compliance exceeded
-            self.timer.stop()
+            self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
+            self.stop_measurement()
 
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current))
+        self.measurements.append((self.current_voltage, average_current, self.direction))
         self.noise_data.append(noise_currents)
 
         # Update plots
@@ -213,7 +245,7 @@ class MeasurementSimulator(QWidget):
             self.n_runs -= 1
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step:
             self.current_voltage = 0
-            self.device.ramp_to_voltage(0)
+            self.device.set_voltage(0)
             self.stop_measurement()
 
     def update_plots(self):
@@ -236,28 +268,32 @@ class MeasurementSimulator(QWidget):
         self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
         # Update noise plot with I(t)
-        if self.noise_data:
-            last_noise = self.noise_data[-1]
-            time_axis = np.linspace(0, self.collection_time, len(last_noise))
-            self.noise_plot.plot(time_axis, last_noise, pen=pg.mkPen(color='g', width=2), clear=True)
-            self.noise_plot.setLabel('left', 'Current (A)')
-            self.noise_plot.setLabel('bottom', 'Time (ms)')
+        # if self.noise_data:
+        #     last_noise = self.noise_data[-1]
+        #     time_axis = np.linspace(0, self.collection_time, len(last_noise))
+        #     self.noise_plot.plot(time_axis, last_noise, pen=pg.mkPen(color='g', width=2), clear=True)
+        #     self.noise_plot.setLabel('left', 'Current (A)')
+        #     self.noise_plot.setLabel('bottom', 'Time (ms)')
 
-            # Optional: Uncomment to show FFT of I(t) instead of I(t)
-            # fft_data = np.abs(fft(last_noise))
-            # freqs = np.fft.fftfreq(len(last_noise), d=(self.collection_time / len(last_noise)) / 1000.0)
-            # self.noise_plot.plot(freqs[:len(freqs)//2], fft_data[:len(freqs)//2], pen=pg.mkPen(color='m', width=2), clear=True)
-            # self.noise_plot.setLabel('left', 'Amplitude (A)')
-            # self.noise_plot.setLabel('bottom', 'Frequency (Hz)')
+        #     # Optional: Uncomment to show FFT of I(t) instead of I(t)
+        #     # fft_data = np.abs(fft(last_noise))
+        #     # freqs = np.fft.fftfreq(len(last_noise), d=(self.collection_time / len(last_noise)) / 1000.0)
+        #     # self.noise_plot.plot(freqs[:len(freqs)//2], fft_data[:len(freqs)//2], pen=pg.mkPen(color='m', width=2), clear=True)
+        #     # self.noise_plot.setLabel('left', 'Amplitude (A)')
+        #     # self.noise_plot.setLabel('bottom', 'Frequency (Hz)')
 
     def export_to_csv(self):
         # Open file dialog to save CSV
-        file_name, _ = QFileDialog.getSaveFileName(self, 'Save CSV', '', 'CSV Files (*.csv)')
-        if file_name:
-            with open(file_name, 'w', newline='') as csvfile:
-                csvwriter = csv.writer(csvfile)
-                csvwriter.writerow(['Voltage (V)', 'Current (A)'])
-                csvwriter.writerows(self.measurements)
+        # file_name, _ = QFileDialog.getSaveFileName(self, 'Save CSV', '', 'CSV Files (*.csv)')
+        # if file_name:
+        sample_dir = op.join(self.date, self.sample_name)
+        if not op.exists(sample_dir):
+            os.mkdirs(sample_dir)
+        if not op.exists(op.join(sample_dir, 'data')):
+            os.mkdirs(op.join(sample_dir, 'data'))
+        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        df = self.get_pandas_data()
+        df.to_csv(op.join(sample_dir, 'data', f'{name}_{time.time()}.data'))
 
     # def mouse_moved(self, evt):
     #     pos = evt[0]  # Get the mouse position
@@ -274,6 +310,33 @@ class MeasurementSimulator(QWidget):
             mouse_point = self.iv_plot.vb.mapSceneToView(pos)  # Use iv_plot.vb directly
             self.v_line.setPos(mouse_point.x())
             self.h_line.setPos(mouse_point.y())
+
+    def get_pandas_data(self):
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])
+        return df
+
+
+    def make_plot(self):
+        sample_dir = op.join(self.date, self.sample_name)
+        if not op.exists(sample_dir):
+            os.mkdirs(sample_dir)
+        if not op.exists(op.join(sample_dir, 'plots')):
+            os.mkdirs(op.join(sample_dir, 'plots'))
+        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        df = self.get_pandas_data()
+
+        up = df.where(df['Direction'] == 1).dropna()
+        down = df.where(df['Direction'] == -1).dropna()
+
+        plt.figure(figsize=(10, 6), dpi=300)
+        plt.plot(up['Voltage'], up['Current'], 'o', label='Up')
+        plt.plot(down['Voltage'], down['Current'], 'o', label='Down')
+        plt.xlabel('Voltage (V)')
+        plt.ylabel('Current (A)')
+
+        plt.legend()
+        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{time.time()}.png'), dpi=300)
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
