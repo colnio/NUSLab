@@ -2,7 +2,8 @@ import pyvisa
 import time
 import logging
 import pandas as pd
-
+# import random
+import numpy as np
 class Keithley6517B:
     def __init__(self, gpib_address='GPIB0::27::INSTR', nplc=1):
         self.rm = pyvisa.ResourceManager()
@@ -91,3 +92,96 @@ class Keithley6517B:
         self.device.write('OUTP OFF')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6517B closed.")
+
+
+class Keithley6517B_Mock:
+    def __init__(self, gpib_address='GPIB0::27::INSTR', nplc=1, I_s=1e-12, n=1.5, T=300):
+        self.gpib_address = gpib_address
+        self.nplc = nplc
+        self.output_enabled = False
+        self.voltage_level = 0.0
+        self.voltage_range = 0.0
+        self.current_range = 0.0
+        self.I_s = I_s  # Saturation current in Amps
+        self.n = n      # Ideality factor
+        self.T = T      # Temperature in Kelvin
+        self.V_T = 25.85e-3  # Thermal voltage (approximately 25.85 mV at 300K)
+        print(f"Mock Keithley 6517B initialized at address {gpib_address} with NPLC={nplc}")
+        self.clear_buffer()
+        self.init_device(nplc)
+
+    def init_device(self, nplc):
+        print(f"Initializing mock device with NPLC={nplc}")
+        self.output_enabled = False
+
+    def clear_buffer(self):
+        """Clears the mock instrument's input buffer."""
+        print("Mock buffer cleared")
+
+    def set_voltage_range(self, range_value):
+        """
+        Set the voltage range.
+        :param range_value: Voltage range in volts (e.g., 10, 100, 200).
+        """
+        self.voltage_range = range_value
+        print(f"Mock voltage range set to {range_value} V")
+
+    def set_current_range(self, range_value):
+        """
+        Set the current range.
+        :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
+        """
+        self.current_range = range_value
+        print(f"Mock current range set to {range_value} A")
+
+    def set_voltage(self, voltage_value):
+        """
+        Set the output voltage.
+        :param voltage_value: Voltage to set (in volts).
+        """
+        self.voltage_level = voltage_value
+        self.output_enabled = True
+        print(f"Mock voltage set to {voltage_value} V and output enabled")
+
+    def disable_output(self):
+        """
+        Disable the output voltage.
+        """
+        self.output_enabled = False
+        print("Mock output disabled")
+
+    def read_current(self, autorange=False):
+        """
+        Read the current through the diode based on the applied voltage using the diode equation.
+        :return: The simulated current (in amps).
+        """
+        if self.output_enabled:
+            V = self.voltage_level
+            # Diode I(V) characteristic (Shockley equation)
+            I = self.I_s * (np.exp(V / (self.n * self.V_T)) - 1)
+            # Simulate noise or rounding in a real device
+            I += (1e-9) * (2 * (np.random.random() - 0.5))  # Small random noise
+            print(f"Mock current read: {I} A")
+            return I
+        else:
+            print("Output is disabled, returning 0 A")
+            return 0.0
+
+    def continuous_current_read(self, delay=1):
+        """
+        Continuously reads the current at intervals.
+        :param delay: Delay between readings in seconds.
+        """
+        try:
+            while True:
+                current_value = self.read_current()
+                print(f"Mock continuous current: {current_value} A")
+                time.sleep(delay)
+        except KeyboardInterrupt:
+            print("Mock continuous current reading stopped.")
+
+    def close(self):
+        """Close the mock GPIB connection."""
+        self.set_voltage(0)
+        self.output_enabled = False
+        print("Mock connection to Keithley 6517B closed.")

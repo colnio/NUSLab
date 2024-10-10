@@ -63,7 +63,7 @@ class MeasurementSimulator(QWidget):
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems(list(list_resources()))
+        self.device_address_input.addItems(list(list_resources()) + ['Mock'])
         # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
@@ -100,13 +100,14 @@ class MeasurementSimulator(QWidget):
         self.voltage_step_input = QDoubleSpinBox()
         self.voltage_step_input.setRange(0.0001, 1)
         self.voltage_step_input.setValue(0.01)
+        self.voltage_step_input.setDecimals(4)
         voltage_step_layout.addWidget(QLabel('Voltage step (V):'))
         voltage_step_layout.addWidget(self.voltage_step_input)
         layout.addLayout(voltage_step_layout)
 
         # nruns input
         nruns_layout = QHBoxLayout()
-        self.nruns_input = QDoubleSpinBox()
+        self.nruns_input = QSpinBox()
         self.nruns_input.setRange(1, 1000)
         self.nruns_input.setValue(2)
         nruns_layout.addWidget(QLabel('N runs (2 is 1 up 1 down)'))
@@ -118,6 +119,7 @@ class MeasurementSimulator(QWidget):
         self.compliance_input = QDoubleSpinBox()
         self.compliance_input.setRange(1e-11, 1e11)
         self.compliance_input.setValue(1e-9)
+        self.compliance_input.setDecimals(6)
         compliance_layout.addWidget(QLabel('Compliance current (A):'))
         compliance_layout.addWidget(self.compliance_input)
         layout.addLayout(compliance_layout)
@@ -154,6 +156,9 @@ class MeasurementSimulator(QWidget):
         # Noise plot
         # self.noise_plot = self.plot_widget.addPlot(title="Noise (I(t)) or FFT")
 
+        # self.abs_iv_plot.setXLink(self.iv_plot)
+        # self.abs_iv_plot.setYLink(self.iv_plot)
+
         layout.addWidget(self.plot_widget)
 
         # Add crosshair (cursor) for the I(V) plot
@@ -182,7 +187,10 @@ class MeasurementSimulator(QWidget):
         self.current_range = self.current_range_input.currentText()
         print('Device address: ', self.device_address)
         if self.device is None:
-            self.device = keithley.Keithley6517B(self.device_address, nplc=0.1)
+            if self.device_address == 'Mock':
+                self.device = keithley.Keithley6517B_Mock()
+            else:
+                self.device = keithley.Keithley6517B(self.device_address, nplc=0.1)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
@@ -253,6 +261,8 @@ class MeasurementSimulator(QWidget):
             self.current_voltage = self.voltage_min
             self.direction *= -1
             self.n_runs -= 1
+        # if self.current_voltage == self.voltage_max or self.current_voltage == self.voltage_min:
+
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step:
             self.current_voltage = 0
             self.device.set_voltage(0)
@@ -335,12 +345,14 @@ class MeasurementSimulator(QWidget):
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
 
-        up = df.where(df['Direction'] == 1).dropna()
-        down = df.where(df['Direction'] == -1).dropna()
+        up = df.where(df['Direction'] == 1).dropna().sort_values('Voltage')
+        down = df.where(df['Direction'] == -1).dropna().sort_values('Voltage')
 
         plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
-        plt.plot(down['Voltage'], down['Current'], 'o-', markersize=3, label='Down')
+        plt.plot(up[up['Voltage'] < 0]['Voltage'], up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
+        plt.plot(up[up['Voltage'] >= 0]['Voltage'], up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
+        # plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
+        plt.plot(down['Voltage'], down['Current'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
         plt.xlabel('Voltage (V)')
         plt.ylabel('Current (A)')
 
@@ -348,8 +360,10 @@ class MeasurementSimulator(QWidget):
         plt.savefig(op.join(sample_dir, 'plots', f'{name}_{self.start_time}.png'), dpi=300)
 
         plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(up['Voltage'], np.abs(up['Current']), 'o-', markersize=3, label='Up')
-        plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down')
+        plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
+        plt.plot(up[up['Voltage'] >= 0]['Voltage'], np.abs(up[up['Voltage'] >= 0]['Current']), 'o-', markersize=3, color='blue', alpha=0.6)
+        # plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
+        plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down', color='green', alpha=0.6)
         plt.xlabel('Voltage (V)')
         plt.ylabel('Current (A)')
         plt.yscale('log')
