@@ -4,23 +4,25 @@ import logging
 import pandas as pd
 
 class Keithley6517B:
-    def __init__(self, gpib_address='27'):
+    def __init__(self, gpib_address='GPIB0::27::INSTR', nplc=1):
         self.rm = pyvisa.ResourceManager()
-        self.device = self.rm.open_resource(f'GPIB::{gpib_address}::INSTR')
+        self.device = self.rm.open_resource(f'{gpib_address}')
         self.device.timeout = 5000  # Timeout for commands, can be adjusted if needed
         self.clear_buffer()
-        self.init_device()
+        self.init_device(nplc)
         # self.log = logging.getLogger()
         
-    def init_device(self):
+    def init_device(self, nplc):
         self.device.write('*CLS;')
-        # self.device.write('*RST;')
+        self.device.write('*RST;')
         # self.device.write(':TRAC:FEED:CONT NEV;*RST')
         # selg.de
         # self.device.write('*ESE 60;*SRE 48;*CLS;:FORM:DATA ASC;:FORM:ELEM READ,RNUM,CHAN,TST,UNIT;:SYST:TST:TYPE RTCL;')
         self.device.write("SYST:ZCH OFF;")
         self.device.write(":SENS:FUNC 'CURR';")
-        self.device.write(":SENS:CURR:NPLC 10")
+        self.device.write(f":SENS:CURR:NPLC {nplc}")
+        self.device.write(':SOUR:VOLT:MCON 1;')
+        # self.device.write
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""

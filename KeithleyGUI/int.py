@@ -52,7 +52,7 @@ class MeasurementSimulator(QWidget):
 
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        
+        self.start_time = time.time()
 
     def initUI(self):
         
@@ -62,11 +62,11 @@ class MeasurementSimulator(QWidget):
 
         # keithley 
         device_address_layout = QHBoxLayout()
-        self.devce_address_input = QComboBox()
-        # self.devce_address_input.addItems(list(list_resources()))
-        self.devce_address_input.addItems(['dev 1', 'dev 2'])
+        self.device_address_input = QComboBox()
+        self.device_address_input.addItems(list(list_resources()))
+        # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
-        device_address_layout.addWidget(self.devce_address_input)
+        device_address_layout.addWidget(self.device_address_input)
         layout.addLayout(device_address_layout)
         # sample name
         sample_name_layout = QHBoxLayout()
@@ -177,22 +177,28 @@ class MeasurementSimulator(QWidget):
         self.compliance_current = self.compliance_input.value()
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
-        self.device_address = self.devce_address_input.currentText
+        self.device_address = self.device_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
-        self.device = keithley.Keithley6517B(self.device_address)
-        time.sleep(1000)
+        self.current_range = self.current_range_input.currentText()
+        print('Device address: ', self.device_address)
+        if self.device is None:
+            self.device = keithley.Keithley6517B(self.device_address, nplc=0.1)
+        time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         # self.current_voltage = self.voltage_min
         self.current_voltage = 0
+        self.start_time = time.time()
+        self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
+        self.device.set_current_range(self.current_range)
         self.timer.start(100)  # Update every 100 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
         # Clear plots
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
-        self.noise_plot.clear()
+        # self.noise_plot.clear()
 
     def stop_measurement(self):
         self.current_voltage = 0
@@ -200,12 +206,11 @@ class MeasurementSimulator(QWidget):
         self.device.disable_output()
         self.timer.stop()
         self.make_plot()
+        self.export_to_csv()
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
 
-        self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
-        self.device.set_current_range(self.current_range)
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
@@ -272,7 +277,7 @@ class MeasurementSimulator(QWidget):
         self.abs_iv_plot.setLabel('left', '|Current| (A)')
         self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
-        # Update noise plot with I(t)
+        # # Update noise plot with I(t)
         # if self.noise_data:
         #     last_noise = self.noise_data[-1]
         #     time_axis = np.linspace(0, self.collection_time, len(last_noise))
@@ -298,7 +303,7 @@ class MeasurementSimulator(QWidget):
             os.makedirs(op.join(sample_dir, 'data'))
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'{name}_{time.time()}.data'))
+        df.to_csv(op.join(sample_dir, 'data', f'{name}_{self.start_time}.data'), index=False)
 
     # def mouse_moved(self, evt):
     #     pos = evt[0]  # Get the mouse position
@@ -334,14 +339,23 @@ class MeasurementSimulator(QWidget):
         down = df.where(df['Direction'] == -1).dropna()
 
         plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(up['Voltage'], up['Current'], 'o', label='Up')
-        plt.plot(down['Voltage'], down['Current'], 'o', label='Down')
+        plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
+        plt.plot(down['Voltage'], down['Current'], 'o-', markersize=3, label='Down')
         plt.xlabel('Voltage (V)')
         plt.ylabel('Current (A)')
 
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{time.time()}.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{self.start_time}.png'), dpi=300)
 
+        plt.figure(figsize=(10, 6), dpi=300)
+        plt.plot(up['Voltage'], np.abs(up['Current']), 'o-', markersize=3, label='Up')
+        plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down')
+        plt.xlabel('Voltage (V)')
+        plt.ylabel('Current (A)')
+        plt.yscale('log')
+        plt.legend()
+        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{self.start_time}_logscaleY.png'), dpi=300)
+    
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
