@@ -47,10 +47,15 @@ class MeasurementSimulator(QWidget):
         self.elapsed_timer = QElapsedTimer()
         # date & make folder
         self.date = str(datetime.date.today())
-        if op.exists(self.date) == False:
-            os.makedirs(self.date)
+
+        self.folder = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
+
+        if op.exists(op.join(self.folder, self.date)) == False:
+            os.makedirs(op.join(self.folder, self.date))
+        
 
     def initUI(self):
+        
         self.setWindowTitle('Keithley 6517B IV')
         layout = QVBoxLayout()
 
@@ -80,7 +85,7 @@ class MeasurementSimulator(QWidget):
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
         self.voltage_min_input.setRange(-10, 10)
-        self.voltage_min_input.setValue(0)
+        self.voltage_min_input.setValue(-1)
         self.voltage_max_input = QDoubleSpinBox()
         self.voltage_max_input.setRange(-10, 10)
         self.voltage_max_input.setValue(1)
@@ -286,11 +291,11 @@ class MeasurementSimulator(QWidget):
         # Open file dialog to save CSV
         # file_name, _ = QFileDialog.getSaveFileName(self, 'Save CSV', '', 'CSV Files (*.csv)')
         # if file_name:
-        sample_dir = op.join(self.date, self.sample_name)
+        sample_dir = op.join(self.folder, self.date, self.sample_name)
         if not op.exists(sample_dir):
-            os.mkdirs(sample_dir)
+            os.makedirs(sample_dir)
         if not op.exists(op.join(sample_dir, 'data')):
-            os.mkdirs(op.join(sample_dir, 'data'))
+            os.makedirs(op.join(sample_dir, 'data'))
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'{name}_{time.time()}.data'))
@@ -317,11 +322,11 @@ class MeasurementSimulator(QWidget):
 
 
     def make_plot(self):
-        sample_dir = op.join(self.date, self.sample_name)
+        sample_dir = op.join(self.folder, self.date, self.sample_name)
         if not op.exists(sample_dir):
-            os.mkdirs(sample_dir)
+            os.makedirs(sample_dir)
         if not op.exists(op.join(sample_dir, 'plots')):
-            os.mkdirs(op.join(sample_dir, 'plots'))
+            os.makedirs(op.join(sample_dir, 'plots'))
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
 
