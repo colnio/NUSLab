@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import os.path as op
 import os 
 
-class MeasurementSimulator(QWidget):
+class VACRegime(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -313,7 +313,7 @@ class MeasurementSimulator(QWidget):
             os.makedirs(op.join(sample_dir, 'data'))
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'{name}_{self.start_time}.data'), index=False)
+        df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
 
     # def mouse_moved(self, evt):
     #     pos = evt[0]  # Get the mouse position
@@ -357,7 +357,7 @@ class MeasurementSimulator(QWidget):
         plt.ylabel('Current (A)')
 
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{self.start_time}.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}.png'), dpi=300)
 
         plt.figure(figsize=(10, 6), dpi=300)
         plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
@@ -368,11 +368,11 @@ class MeasurementSimulator(QWidget):
         plt.ylabel('Current (A)')
         plt.yscale('log')
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'{name}_{self.start_time}_logscaleY.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}_logscaleY.png'), dpi=300)
     
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = MeasurementSimulator()
+    window = VACRegime()
     window.show()
     sys.exit(app.exec_())
