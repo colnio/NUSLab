@@ -1,14 +1,9 @@
-from cProfile import label
 import sys
 import numpy as np
-import csv
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit)
 from PyQt5.QtCore import QTimer, QElapsedTimer
-from scipy.fft import fft
-# from pymeasure.instruments.keithley import Keithley6517B
 import keithley
-import random 
 import pandas as pd
 from pymeasure.instruments.resources import list_resources
 import time 
@@ -59,7 +54,6 @@ class VACRegime(QWidget):
         self.setWindowTitle('Keithley 6517B IV')
         layout = QVBoxLayout()
 
-
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
@@ -77,7 +71,7 @@ class VACRegime(QWidget):
         # Current range input
         current_range_layout = QHBoxLayout()
         self.current_range_input = QComboBox()
-        self.current_range_input.addItems((2 * 10.0**np.arange(-12.0, -4.0, 1.0)).astype(str))
+        self.current_range_input.addItems(list((2 * 10.0**np.arange(-12.0, -4.0, 1.0)).astype(str)) + ['Auto-range'])
         current_range_layout.addWidget(QLabel('Current range (A):'))
         current_range_layout.addWidget(self.current_range_input)
         layout.addLayout(current_range_layout)
@@ -119,7 +113,7 @@ class VACRegime(QWidget):
         self.compliance_input = QDoubleSpinBox()
         self.compliance_input.setRange(1e-11, 1e11)
         self.compliance_input.setValue(1e-9)
-        self.compliance_input.setDecimals(6)
+        self.compliance_input.setDecimals(9)
         compliance_layout.addWidget(QLabel('Compliance current (A):'))
         compliance_layout.addWidget(self.compliance_input)
         layout.addLayout(compliance_layout)
@@ -153,12 +147,6 @@ class VACRegime(QWidget):
         # Enable logarithmic scale for abs(I(V))
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
 
-        # Noise plot
-        # self.noise_plot = self.plot_widget.addPlot(title="Noise (I(t)) or FFT")
-
-        # self.abs_iv_plot.setXLink(self.iv_plot)
-        # self.abs_iv_plot.setYLink(self.iv_plot)
-
         layout.addWidget(self.plot_widget)
 
         # Add crosshair (cursor) for the I(V) plot
@@ -167,11 +155,6 @@ class VACRegime(QWidget):
         self.iv_plot.addItem(self.v_line, ignoreBounds=True)
         self.iv_plot.addItem(self.h_line, ignoreBounds=True)
         self.proxy = pg.SignalProxy(self.iv_plot.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
-
-        # Button to export to CSV
-        # self.export_button = QPushButton('Export to CSV')
-        # self.export_button.clicked.connect(self.export_to_csv)
-        # layout.addWidget(self.export_button)
 
         self.setLayout(layout)
 
@@ -195,23 +178,23 @@ class VACRegime(QWidget):
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
-        # self.current_voltage = self.voltage_min
         self.current_voltage = 0
         self.start_time = time.time()
         self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
-        self.device.set_current_range(self.current_range)
+        if self.current_range != 'Auto-range':
+            self.device.set_current_range(self.current_range)
         self.timer.start(100)  # Update every 100 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
         # Clear plots
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
-        # self.noise_plot.clear()
 
-    def stop_measurement(self):
-        self.current_voltage = 0
-        self.device.set_voltage(0)
-        self.device.disable_output()
+    def stop_measurement(self, reset_voltage = True):
+        if reset_voltage:
+            self.current_voltage = 0
+            self.device.set_voltage(0)
+            self.device.disable_output()
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()
@@ -228,7 +211,7 @@ class VACRegime(QWidget):
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
             self.device.set_voltage(self.current_voltage)
-            current = self.device.read_current(autorange=False)
+            current = self.device.read_current(autorange=(self.current_range == 'Auto-range'))
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
@@ -241,8 +224,8 @@ class VACRegime(QWidget):
 
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
-            self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
-            self.stop_measurement()
+            # self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
+            self.stop_measurement(reset_voltage=False)
 
         # Store the data (voltage, average current)
         self.measurements.append((self.current_voltage, average_current, self.direction))
@@ -261,7 +244,6 @@ class VACRegime(QWidget):
             self.current_voltage = self.voltage_min
             self.direction *= -1
             self.n_runs -= 1
-        # if self.current_voltage == self.voltage_max or self.current_voltage == self.voltage_min:
 
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step:
             self.current_voltage = 0
@@ -287,25 +269,8 @@ class VACRegime(QWidget):
         self.abs_iv_plot.setLabel('left', '|Current| (A)')
         self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
-        # # Update noise plot with I(t)
-        # if self.noise_data:
-        #     last_noise = self.noise_data[-1]
-        #     time_axis = np.linspace(0, self.collection_time, len(last_noise))
-        #     self.noise_plot.plot(time_axis, last_noise, pen=pg.mkPen(color='g', width=2), clear=True)
-        #     self.noise_plot.setLabel('left', 'Current (A)')
-        #     self.noise_plot.setLabel('bottom', 'Time (ms)')
-
-        #     # Optional: Uncomment to show FFT of I(t) instead of I(t)
-        #     # fft_data = np.abs(fft(last_noise))
-        #     # freqs = np.fft.fftfreq(len(last_noise), d=(self.collection_time / len(last_noise)) / 1000.0)
-        #     # self.noise_plot.plot(freqs[:len(freqs)//2], fft_data[:len(freqs)//2], pen=pg.mkPen(color='m', width=2), clear=True)
-        #     # self.noise_plot.setLabel('left', 'Amplitude (A)')
-        #     # self.noise_plot.setLabel('bottom', 'Frequency (Hz)')
-
     def export_to_csv(self):
-        # Open file dialog to save CSV
-        # file_name, _ = QFileDialog.getSaveFileName(self, 'Save CSV', '', 'CSV Files (*.csv)')
-        # if file_name:
+
         sample_dir = op.join(self.folder, self.date, self.sample_name)
         if not op.exists(sample_dir):
             os.makedirs(sample_dir)
@@ -315,15 +280,6 @@ class VACRegime(QWidget):
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
 
-    # def mouse_moved(self, evt):
-    #     pos = evt[0]  # Get the mouse position
-    #     if self.iv_plot.sceneBoundingRect().contains(pos):
-    #         mouse_point = self.iv_plot.plotItem.vb.mapSceneToView(pos)
-    #         self.v_line.setPos(mouse_point.x())
-    #         self.h_line.setPos(mouse_point.y())
-
-    #         # Optionally, display the value somewhere in the GUI or print it
-    #         print(f"Voltage: {mouse_point.x():.2f} V, Current: {mouse_point.y():.6e} A")
     def mouse_moved(self, evt):
         pos = evt[0]  # Get the mouse position
         if self.iv_plot.sceneBoundingRect().contains(pos):
@@ -334,7 +290,6 @@ class VACRegime(QWidget):
     def get_pandas_data(self):
         df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])
         return df
-
 
     def make_plot(self):
         sample_dir = op.join(self.folder, self.date, self.sample_name)
@@ -351,7 +306,6 @@ class VACRegime(QWidget):
         plt.figure(figsize=(10, 6), dpi=300)
         plt.plot(up[up['Voltage'] < 0]['Voltage'], up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
-        # plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
         plt.plot(down['Voltage'], down['Current'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
         plt.xlabel('Voltage (V)')
         plt.ylabel('Current (A)')
@@ -362,7 +316,6 @@ class VACRegime(QWidget):
         plt.figure(figsize=(10, 6), dpi=300)
         plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], np.abs(up[up['Voltage'] >= 0]['Current']), 'o-', markersize=3, color='blue', alpha=0.6)
-        # plt.plot(up['Voltage'], up['Current'], 'o-', markersize=3, label='Up')
         plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down', color='green', alpha=0.6)
         plt.xlabel('Voltage (V)')
         plt.ylabel('Current (A)')
