@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
 import pandas as pd
@@ -42,7 +42,6 @@ class VACRegime(QWidget):
         self.elapsed_timer = QElapsedTimer()
         # date & make folder
         self.date = str(datetime.date.today())
-
         self.folder = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
 
         if op.exists(op.join(self.folder, self.date)) == False:
@@ -139,8 +138,10 @@ class VACRegime(QWidget):
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
+        self.plot_widget.setBackground('w')
 
         # I(V) plot
+        pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
         self.abs_iv_plot = self.plot_widget.addPlot(title="|I(V)|")
 
@@ -173,7 +174,7 @@ class VACRegime(QWidget):
             if self.device_address == 'Mock':
                 self.device = keithley.Keithley6517B_Mock()
             else:
-                self.device = keithley.Keithley6517B(self.device_address, nplc=0.1)
+                self.device = keithley.Keithley6517B(self.device_address, nplc=1)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
@@ -191,13 +192,14 @@ class VACRegime(QWidget):
         self.abs_iv_plot.clear()
 
     def stop_measurement(self, reset_voltage = True):
-        if reset_voltage:
-            self.current_voltage = 0
-            self.device.set_voltage(0)
-            self.device.disable_output()
+        # if reset_voltage:
+        self.current_voltage = 0
+        self.device.set_voltage(0)
+        self.device.disable_output()
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()
+        self.direction = 1
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
@@ -205,13 +207,15 @@ class VACRegime(QWidget):
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
-
         noise_currents = []  # Store the current noise
 
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
             self.device.set_voltage(self.current_voltage)
-            current = self.device.read_current(autorange=(self.current_range == 'Auto-range'))
+            current = self.device.read_current(autorange=False)
+            rng = self.device.get_current_range()
+            if (current > 10 or current < rng/10) and (self.current_range == 'Auto-range'):
+                current = self.device.read_current(autorange=True)
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
@@ -226,6 +230,7 @@ class VACRegime(QWidget):
         if abs(average_current) >= self.compliance_current:
             # self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
             self.stop_measurement(reset_voltage=False)
+            QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         # Store the data (voltage, average current)
         self.measurements.append((self.current_voltage, average_current, self.direction))
@@ -240,6 +245,7 @@ class VACRegime(QWidget):
             self.current_voltage = self.voltage_max
             self.direction *= -1
             self.n_runs -= 1
+
         if self.current_voltage < self.voltage_min:
             self.current_voltage = self.voltage_min
             self.direction *= -1

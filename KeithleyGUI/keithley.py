@@ -44,6 +44,10 @@ class Keithley6517B:
         """
         self.device.write(f'CURR:RANG {range_value};')
         print(f"Current range set to {range_value} A")
+    
+    def get_current_range(self):
+        self.device.write('CURR:RANG?;')
+        return eval(self.device.read())
 
     def set_voltage(self, voltage_value):
         """
@@ -67,7 +71,7 @@ class Keithley6517B:
         :return: The measured current (in amps).
         """
         if autorange:
-            self.device.write('MEAS:CURR?;')
+            self.device.write('MEAS?;')
         else:
             self.device.write(':READ?;')
         current_value = self.device.read().split(',')[0][:-4:]

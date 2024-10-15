@@ -1,14 +1,9 @@
-from cProfile import label
 import sys
 import numpy as np
-import csv
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
 from PyQt5.QtCore import QTimer, QElapsedTimer
-from scipy.fft import fft
-# from pymeasure.instruments.keithley import Keithley6517B
 import keithley
-import random 
 import pandas as pd
 from pymeasure.instruments.resources import list_resources
 import time 
@@ -26,8 +21,6 @@ class PulsesRegime(QWidget):
         self.sample_name = ''
         # self.device = keithley.Keithley6517B('GPIB0::27::INSTR')
         self.device_address = ''
-        # self.voltage_min = 0
-        # self.voltage_max = 1
         self.v_set = 0 
         self.v_read_set = 0
         self.v_reset = 0
@@ -65,7 +58,6 @@ class PulsesRegime(QWidget):
         
         self.setWindowTitle('Keithley 6517B IV')
         layout = QVBoxLayout()
-
 
         # keithley 
         device_address_layout = QHBoxLayout()
@@ -239,6 +231,7 @@ class PulsesRegime(QWidget):
             self.current_voltage = 0
             self.device.set_voltage(0)
             self.stop_measurement()
+            QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         if self.n_runs <= 0:
             self.current_voltage = 0
@@ -274,9 +267,7 @@ class PulsesRegime(QWidget):
 
 
     def export_to_csv(self):
-        # Open file dialog to save CSV
-        # file_name, _ = QFileDialog.getSaveFileName(self, 'Save CSV', '', 'CSV Files (*.csv)')
-        # if file_name:
+
         sample_dir = op.join(self.folder, self.date, self.sample_name)
         if not op.exists(sample_dir):
             os.makedirs(sample_dir)
