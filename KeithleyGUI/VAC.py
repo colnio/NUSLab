@@ -150,12 +150,10 @@ class VACRegime(QWidget):
 
         layout.addWidget(self.plot_widget)
 
-        # Add crosshair (cursor) for the I(V) plot
-        self.v_line = pg.InfiniteLine(angle=90, movable=False)
-        self.h_line = pg.InfiniteLine(angle=0, movable=False)
-        self.iv_plot.addItem(self.v_line, ignoreBounds=True)
-        self.iv_plot.addItem(self.h_line, ignoreBounds=True)
-        self.proxy = pg.SignalProxy(self.iv_plot.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
+        # self.label = pg.LabelItem(justify='right')
+        # self.plot_widget.addItem(self.label)
+        # # self.proxy = pg.SignalProxy(self.iv_plot.scene().sigMouseMoved, rateLimit=60, callback=self.mouseMoved)
+        # self.iv_plot.scene().sigMouseMoved.connect(self.mouseMoved)
 
         self.setLayout(layout)
 
@@ -286,12 +284,17 @@ class VACRegime(QWidget):
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
 
-    def mouse_moved(self, evt):
-        pos = evt[0]  # Get the mouse position
-        if self.iv_plot.sceneBoundingRect().contains(pos):
-            mouse_point = self.iv_plot.vb.mapSceneToView(pos)  # Use iv_plot.vb directly
-            self.v_line.setPos(mouse_point.x())
-            self.h_line.setPos(mouse_point.y())
+    # def mouseMoved(self, pos):
+    #     if self.iv_plot.sceneBoundingRect().contains(pos):
+    #         mouse_point = self.iv_plot.plotItem.vb.mapSceneToView(pos)
+    #         index = int(mouse_point.x())
+    #         if 0 <= index < len(self.x):
+    #             x = self.x[index]
+    #             y = self.y[index]
+    #             self.label.setText(f"x: {x:.2f}, y: {y:.2f}", color='b')
+    #             self.label.setPos(mouse_point.x(), mouse_point.y())
+    #         else:
+    #             self.label.setText("")  # Clear label if outside bounds
 
     def get_pandas_data(self):
         df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])

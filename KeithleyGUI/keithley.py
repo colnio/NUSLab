@@ -71,7 +71,7 @@ class Keithley6517B:
         :return: The measured current (in amps).
         """
         if autorange:
-            self.device.write('MEAS?;')
+            self.device.write(':MEAS?;')
         else:
             self.device.write(':READ?;')
         current_value = self.device.read().split(',')[0][:-4:]
@@ -170,6 +170,10 @@ class Keithley6517B_Mock:
         else:
             print("Output is disabled, returning 0 A")
             return 0.0
+    
+    def get_current_range(self):
+        # self.device.write('CURR:RANG?;')
+        return 1e-2
 
     def continuous_current_read(self, delay=1):
         """
