@@ -12,6 +12,23 @@ import matplotlib.pyplot as plt
 import os.path as op
 import os 
 
+
+def find_range(current):
+    ranges = 2 * 10.0**np.arange(-12.0, -4.0, 1.0)
+    idx = np.where(ranges > current)[0]
+    if len(idx) > 0:
+        return ranges[min(idx)]
+    return None
+
+def auto_range(device, p1=None):
+    if p1 is None:
+        c = device.read_current(autorange=True)
+        device.set_current_range(find_range(abs(c) * 10))
+    else:
+        device.set_current_range(find_range(abs(p1) * 10))
+        c = device.read_current()
+    return c if c < 10 else device.read_current(autorange=True)
+
 class VACRegime(QWidget):
     def __init__(self):
         super().__init__()
@@ -182,7 +199,7 @@ class VACRegime(QWidget):
         self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             self.device.set_current_range(self.current_range)
-        self.timer.start(100)  # Update every 100 ms
+        self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
         # Clear plots
@@ -207,13 +224,17 @@ class VACRegime(QWidget):
         num_measurements = 0
         noise_currents = []  # Store the current noise
 
+        self.device.set_voltage(self.current_voltage)
+        p1 = None
+        if len(self.measurements) > 0:
+            p1 = self.measurements[-1][1]
+
+        if self.current_range == 'Auto-range':
+            current = auto_range(self.device, p1=p1)
+        
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
-            self.device.set_voltage(self.current_voltage)
             current = self.device.read_current(autorange=False)
-            rng = self.device.get_current_range()
-            if (current > 10 or current < rng/10) and (self.current_range == 'Auto-range'):
-                current = self.device.read_current(autorange=True)
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1

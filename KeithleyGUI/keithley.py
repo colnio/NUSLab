@@ -4,6 +4,8 @@ import logging
 import pandas as pd
 # import random
 import numpy as np
+
+
 class Keithley6517B:
     def __init__(self, gpib_address='GPIB0::27::INSTR', nplc=1):
         self.rm = pyvisa.ResourceManager()
@@ -11,19 +13,14 @@ class Keithley6517B:
         self.device.timeout = 5000  # Timeout for commands, can be adjusted if needed
         self.clear_buffer()
         self.init_device(nplc)
-        # self.log = logging.getLogger()
         
     def init_device(self, nplc):
         self.device.write('*CLS;')
         self.device.write('*RST;')
-        # self.device.write(':TRAC:FEED:CONT NEV;*RST')
-        # selg.de
-        # self.device.write('*ESE 60;*SRE 48;*CLS;:FORM:DATA ASC;:FORM:ELEM READ,RNUM,CHAN,TST,UNIT;:SYST:TST:TYPE RTCL;')
         self.device.write("SYST:ZCH OFF;")
         self.device.write(":SENS:FUNC 'CURR';")
         self.device.write(f":SENS:CURR:NPLC {nplc}")
         self.device.write(':SOUR:VOLT:MCON 1;')
-        # self.device.write
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -43,7 +40,6 @@ class Keithley6517B:
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
         self.device.write(f'CURR:RANG {range_value};')
-        print(f"Current range set to {range_value} A")
     
     def get_current_range(self):
         self.device.write('CURR:RANG?;')
