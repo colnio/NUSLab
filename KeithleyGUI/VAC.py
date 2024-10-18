@@ -14,18 +14,18 @@ import os
 
 
 def find_range(current):
-    ranges = 2 * 10.0**np.arange(-12.0, -4.0, 1.0)
+    ranges = 2 * 10.0**np.arange(-12.0, -1.0, 1.0)
     idx = np.where(ranges > current)[0]
     if len(idx) > 0:
         return ranges[min(idx)]
-    return None
+    return max(ranges)
 
 def auto_range(device, p1=None):
     if p1 is None:
         c = device.read_current(autorange=True)
-        device.set_current_range(find_range(abs(c) * 10))
+        device.set_current_range(find_range(abs(c) * 3))
     else:
-        device.set_current_range(find_range(abs(p1) * 10))
+        device.set_current_range(find_range(abs(p1) * 3))
         c = device.read_current()
     return c if c < 10 else device.read_current(autorange=True)
 
@@ -126,10 +126,7 @@ class VACRegime(QWidget):
 
         # Compliance current input
         compliance_layout = QHBoxLayout()
-        self.compliance_input = QDoubleSpinBox()
-        self.compliance_input.setRange(1e-11, 1e11)
-        self.compliance_input.setValue(1e-9)
-        self.compliance_input.setDecimals(9)
+        self.compliance_input = QLineEdit()
         compliance_layout.addWidget(QLabel('Compliance current (A):'))
         compliance_layout.addWidget(self.compliance_input)
         layout.addLayout(compliance_layout)
@@ -160,17 +157,14 @@ class VACRegime(QWidget):
         # I(V) plot
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
+        self.iv_plot.showGrid(x=True, y=True)
         self.abs_iv_plot = self.plot_widget.addPlot(title="|I(V)|")
+        self.abs_iv_plot.showGrid(x=True, y=True)
 
         # Enable logarithmic scale for abs(I(V))
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
 
         layout.addWidget(self.plot_widget)
-
-        # self.label = pg.LabelItem(justify='right')
-        # self.plot_widget.addItem(self.label)
-        # # self.proxy = pg.SignalProxy(self.iv_plot.scene().sigMouseMoved, rateLimit=60, callback=self.mouseMoved)
-        # self.iv_plot.scene().sigMouseMoved.connect(self.mouseMoved)
 
         self.setLayout(layout)
 
@@ -178,18 +172,22 @@ class VACRegime(QWidget):
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
-        self.compliance_current = self.compliance_input.value()
+        try:
+            self.compliance_current = eval(self.compliance_input.text())
+        except:
+            QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
+            return
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.device_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
         self.current_range = self.current_range_input.currentText()
         print('Device address: ', self.device_address)
-        if self.device is None:
-            if self.device_address == 'Mock':
-                self.device = keithley.Keithley6517B_Mock()
-            else:
-                self.device = keithley.Keithley6517B(self.device_address, nplc=1)
+        # if self.device is None:
+        if self.device_address == 'Mock':
+            self.device = keithley.Keithley6517B_Mock()
+        else:
+            self.device = keithley.Keithley6517B(self.device_address, nplc=1)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
@@ -228,10 +226,13 @@ class VACRegime(QWidget):
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
-
+            if p1 == 0: 
+                p1 = None
         if self.current_range == 'Auto-range':
             current = auto_range(self.device, p1=p1)
-        
+        total_current += self.device.read_current()
+        num_measurements += 1
+            # print(f'total current at the start (p0) : {total_current}')
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
             current = self.device.read_current(autorange=False)
@@ -248,7 +249,7 @@ class VACRegime(QWidget):
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
             # self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
-            self.stop_measurement(reset_voltage=False)
+            self.stop_measurement()
             QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         # Store the data (voltage, average current)
@@ -270,8 +271,11 @@ class VACRegime(QWidget):
             self.direction *= -1
             self.n_runs -= 1
 
-        if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step:
+        if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
             self.current_voltage = 0
+            # self.device.set_voltage(0)
+            # self.stop_measurement()
+        if self.n_runs <= 0 and self.current_voltage == 0:
             self.device.set_voltage(0)
             self.stop_measurement()
 
@@ -305,17 +309,6 @@ class VACRegime(QWidget):
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
 
-    # def mouseMoved(self, pos):
-    #     if self.iv_plot.sceneBoundingRect().contains(pos):
-    #         mouse_point = self.iv_plot.plotItem.vb.mapSceneToView(pos)
-    #         index = int(mouse_point.x())
-    #         if 0 <= index < len(self.x):
-    #             x = self.x[index]
-    #             y = self.y[index]
-    #             self.label.setText(f"x: {x:.2f}, y: {y:.2f}", color='b')
-    #             self.label.setPos(mouse_point.x(), mouse_point.y())
-    #         else:
-    #             self.label.setText("")  # Clear label if outside bounds
 
     def get_pandas_data(self):
         df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])
@@ -332,8 +325,8 @@ class VACRegime(QWidget):
 
         up = df.where(df['Direction'] == 1).dropna().sort_values('Voltage')
         down = df.where(df['Direction'] == -1).dropna().sort_values('Voltage')
-
         plt.figure(figsize=(10, 6), dpi=300)
+        plt.ticklabel_format(axis='y', style='scientific')
         plt.plot(up[up['Voltage'] < 0]['Voltage'], up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
         plt.plot(down['Voltage'], down['Current'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
@@ -344,6 +337,7 @@ class VACRegime(QWidget):
         plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}.png'), dpi=300)
 
         plt.figure(figsize=(10, 6), dpi=300)
+        plt.ticklabel_format(axis='y', style='scientific')
         plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], np.abs(up[up['Voltage'] >= 0]['Current']), 'o-', markersize=3, color='blue', alpha=0.6)
         plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down', color='green', alpha=0.6)
