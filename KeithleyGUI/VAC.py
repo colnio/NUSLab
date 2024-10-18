@@ -187,14 +187,18 @@ class VACRegime(QWidget):
         if self.device_address == 'Mock':
             self.device = keithley.Keithley6517B_Mock()
         else:
-            self.device = keithley.Keithley6517B(self.device_address, nplc=1)
+            if '27' in self.device_address:
+                self.device = keithley.Keithley6517B(self.device_address, nplc=1)
+            if '16' in self.device_address:
+                self.device = keithley.Keithley6430(self.device_address, nplc=1)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
         self.start_time = time.time()
-        self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
+        if not '16' in self.device_address:
+            self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             self.device.set_current_range(self.current_range)
         self.timer.start(50)  # Update every 50 ms
@@ -261,6 +265,7 @@ class VACRegime(QWidget):
 
         # Move to the next voltage step
         self.current_voltage += self.voltage_step * self.direction
+
         if self.current_voltage > self.voltage_max:
             self.current_voltage = self.voltage_max
             self.direction *= -1
@@ -271,13 +276,14 @@ class VACRegime(QWidget):
             self.direction *= -1
             self.n_runs -= 1
 
-        if self.n_runs <= 0 and self.current_voltage == 0:
-            self.device.set_voltage(0)
-            self.stop_measurement()
+        # if self.n_runs <= 0 and self.current_voltage == 0:
+        #     self.device.set_voltage(0)
+        #     self.stop_measurement()
+
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
             self.current_voltage = 0
-            # self.device.set_voltage(0)
-            # self.stop_measurement()
+            self.device.set_voltage(0)
+            self.stop_measurement()
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
