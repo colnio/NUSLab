@@ -271,13 +271,13 @@ class VACRegime(QWidget):
             self.direction *= -1
             self.n_runs -= 1
 
+        if self.n_runs <= 0 and self.current_voltage == 0:
+            self.device.set_voltage(0)
+            self.stop_measurement()
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
             self.current_voltage = 0
             # self.device.set_voltage(0)
             # self.stop_measurement()
-        if self.n_runs <= 0 and self.current_voltage == 0:
-            self.device.set_voltage(0)
-            self.stop_measurement()
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
