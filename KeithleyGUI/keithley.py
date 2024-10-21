@@ -1,10 +1,26 @@
 import pyvisa
 import time
-import logging
-import pandas as pd
-# import random
 import numpy as np
+from pyvisa import ResourceManager
 
+def get_devices():
+    l = []
+    rm = ResourceManager()
+    try : 
+        a = rm.list_resources()
+    except Exception as E:
+        print(E)
+        pass
+    for r in a:
+        try:
+            res = rm.open_resource(r)
+            id = res.query('*idn?')
+        except:
+            id = 'Unkown'
+        if 'keithley' in id.lower():
+            l.append([r, id.split(',')[1]])
+    return l
+    
 
 class Keithley6517B:
     def __init__(self, gpib_address='GPIB0::27::INSTR', nplc=1):

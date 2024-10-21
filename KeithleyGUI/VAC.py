@@ -5,7 +5,6 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
 import pandas as pd
-from pymeasure.instruments.resources import list_resources
 import time 
 import datetime
 import matplotlib.pyplot as plt
@@ -63,7 +62,7 @@ class VACRegime(QWidget):
 
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        self.start_time = time.time()
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S') 
 
     def initUI(self):
         
@@ -73,7 +72,7 @@ class VACRegime(QWidget):
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems(list(list_resources()) + ['Mock'])
+        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices()] + ['Mock'])
         # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
@@ -187,16 +186,16 @@ class VACRegime(QWidget):
         if self.device_address == 'Mock':
             self.device = keithley.Keithley6517B_Mock()
         else:
-            if '27' in self.device_address:
+            if '6517B' in self.device_address:
                 self.device = keithley.Keithley6517B(self.device_address, nplc=1)
-            if '16' in self.device_address:
+            if '6430' in self.device_address:
                 self.device = keithley.Keithley6430(self.device_address, nplc=1)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
-        self.start_time = time.time()
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         if not '16' in self.device_address:
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
