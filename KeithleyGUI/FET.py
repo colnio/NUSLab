@@ -59,7 +59,7 @@ class IVgRegime(QWidget):
 
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S') 
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
 
     def initUI(self):
         
@@ -196,16 +196,25 @@ class IVgRegime(QWidget):
         self.device_sd_address = self.device_sd_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
         self.current_range = self.current_range_input.currentText()
-        
+        print(f"Gate device : {self.device_gate_address}")
+        print(f"Gate device : {self.device_sd_address}")
         if self.device_gate_address == self.device_sd_address and (self.device_gate_address != 'Mock' or self.device_sd_address != 'Mock'):
             QMessageBox.critical(None, "Error", f"Choose different devices for gate and source-drain.")
-        self.device_gate = keithley.get_device(self.device_gate_address.split(' ')[0], nplc=0.01)
-        self.device_sd = keithley.get_device(self.device_sd_address.split(' ')[0], nplc=self.nplc)
+        self.device_gate = keithley.get_device(self.device_gate_address, nplc=0.01)
+        self.device_sd = keithley.get_device(self.device_sd_address, nplc=self.nplc)
+
+        if self.device_gate == None:
+            QMessageBox.critical(None, "Error", f"Gate device not found")
+
+        if self.device_sd == None:
+            QMessageBox.critical(None, "Error", f"Source-drain device not found")
+
+
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
-        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if type(self.device_gate) == keithley.Keithley6517B:
             self.device_gate.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
@@ -216,6 +225,7 @@ class IVgRegime(QWidget):
         # Clear plots
         self.iv_plot.clear()
         self.fet_vg_plot.clear()
+        self.direction = 1
 
     def stop_measurement(self):
         # if reset_voltage:

@@ -20,13 +20,17 @@ def auto_range(device, p1=None):
     return c if c < 10 else device.read_current(autorange=True)
 
 def get_device(gpib_address, nplc):
+    device = None
     if gpib_address == 'Mock':
             device = Keithley6517B_Mock()
     else:
-        if '6517B' in gpib_address:
-            device = Keithley6517B(gpib_address, nplc=nplc)
-        if '6430' in gpib_address:
-            device = Keithley6430(gpib_address, nplc=nplc)
+        try:
+            if '6517B' in gpib_address:
+                device = Keithley6517B(gpib_address.split(' ')[0], nplc=nplc)
+            if '6430' in gpib_address:
+                device = Keithley6430(gpib_address.split(' ')[0], nplc=nplc)
+        except:
+            pass
     time.sleep(1)
     return device
 

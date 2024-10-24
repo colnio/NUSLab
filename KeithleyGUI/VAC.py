@@ -47,7 +47,7 @@ class VACRegime(QWidget):
 
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S') 
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
 
     def initUI(self):
         
@@ -174,14 +174,18 @@ class VACRegime(QWidget):
         self.device_address = self.device_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
         self.current_range = self.current_range_input.currentText()
+        self.direction = 1
         print('Device address: ', self.device_address)
         # if self.device is None:
-        self.device = keithley.get_device(self.device_address.split(' ')[0], nplc=self.nplc)
+        self.device = keithley.get_device(self.device_address, nplc=self.nplc)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
-        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
+        if self.device == None:
+            QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
+            return
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':

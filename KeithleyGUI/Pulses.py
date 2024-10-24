@@ -51,7 +51,7 @@ class PulsesRegime(QWidget):
 
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        self.start_time = time.time()
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
     def initUI(self):
         
@@ -166,7 +166,7 @@ class PulsesRegime(QWidget):
         self.sample_name = self.sample_name_input.text()
         self.nplc = self.nplc_input.currentText()
         print('Device address: ', self.device_address)
-        self.device = keithley.get_device(self.device_address.split(' ')[0], nplc=self.nplc)
+        self.device = keithley.get_device(self.device_address, nplc=self.nplc)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.voltages = []
@@ -176,7 +176,11 @@ class PulsesRegime(QWidget):
         self.i_read_reset = []
         # self.current_voltage = self.voltage_min
         self.current_voltage = 0
-        self.start_time = time.time()
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
+
+        if self.device == None:
+            QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
+            return
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.v_set), abs(self.v_reset)))
         self.timer.start(100)  # Update every 100 ms
