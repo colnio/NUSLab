@@ -3,7 +3,34 @@ import time
 import numpy as np
 from pyvisa import ResourceManager
 
-def get_devices():
+def find_range(current):
+    ranges = 2 * 10.0**np.arange(-12.0, -1.0, 1.0)
+    idx = np.where(ranges > current)[0]
+    if len(idx) > 0:
+        return ranges[min(idx)]
+    return max(ranges)
+
+def auto_range(device, p1=None):
+    if p1 is None:
+        c = device.read_current(autorange=True)
+        device.set_current_range(find_range(abs(c) * 3))
+    else:
+        device.set_current_range(find_range(abs(p1) * 3))
+        c = device.read_current()
+    return c if c < 10 else device.read_current(autorange=True)
+
+def get_device(gpib_address, nplc):
+    if gpib_address == 'Mock':
+            device = Keithley6517B_Mock()
+    else:
+        if '6517B' in gpib_address:
+            device = Keithley6517B(gpib_address, nplc=nplc)
+        if '6430' in gpib_address:
+            device = Keithley6430(gpib_address, nplc=nplc)
+    time.sleep(1)
+    return device
+
+def get_devices_list():
     l = []
     rm = ResourceManager()
     try : 

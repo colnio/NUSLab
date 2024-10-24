@@ -11,9 +11,21 @@ import matplotlib.pyplot as plt
 import os.path as op
 import os 
 
+def derivative(arr, step):
+    if len(arr) == 1:
+        return arr
+    outp = np.zeros(arr.shape, dtype=np.float64)
+    for i in range(len(arr)):
+        if i == 0:
+            out = arr[1] - arr[0]
+        elif i == len(arr) - 1:
+            out = arr[-1] - arr[-2]
+        else:
+            out = (arr[i + 1] - arr[i - 1]) / 2
+        outp[i] = out / step
+    return outp
 
-
-class VACRegime(QWidget):
+class IVgRegime(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -51,17 +63,23 @@ class VACRegime(QWidget):
 
     def initUI(self):
         
-        self.setWindowTitle('Keithley 6517B IV')
+        self.setWindowTitle('Keithley IV')
         layout = QVBoxLayout()
 
         # keithley 
-        device_address_layout = QHBoxLayout()
-        self.device_address_input = QComboBox()
-        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
-        # self.device_address_input.addItems(['dev 1', 'dev 2'])
-        device_address_layout.addWidget(QLabel('Device address:'))
-        device_address_layout.addWidget(self.device_address_input)
-        layout.addLayout(device_address_layout)
+        device_sd_address_layout = QHBoxLayout()
+        self.device_sd_address_input = QComboBox()
+        self.device_sd_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        device_sd_address_layout.addWidget(QLabel('Source-Drain Device address:'))
+        device_sd_address_layout.addWidget(self.device_sd_address_input)
+        layout.addLayout(device_sd_address_layout)
+        # keithley 
+        device_gate_address_layout = QHBoxLayout()
+        self.device_gate_address_input = QComboBox()
+        self.device_gate_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        device_gate_address_layout.addWidget(QLabel('Gate Device address:'))
+        device_gate_address_layout.addWidget(self.device_gate_address_input)
+        layout.addLayout(device_gate_address_layout)
         # sample name
         sample_name_layout = QHBoxLayout()
         self.sample_name_input = QLineEdit()
@@ -90,10 +108,15 @@ class VACRegime(QWidget):
         self.voltage_max_input = QDoubleSpinBox()
         self.voltage_max_input.setRange(-10, 10)
         self.voltage_max_input.setValue(1)
-        voltage_range_layout.addWidget(QLabel('Vmin (V):'))
+        self.voltage_sd_input = QDoubleSpinBox()
+        self.voltage_sd_input.setRange(-10, 10)
+        self.voltage_sd_input.setValue(0.01)
+        voltage_range_layout.addWidget(QLabel('Gate Voltage min (V):'))
         voltage_range_layout.addWidget(self.voltage_min_input)
-        voltage_range_layout.addWidget(QLabel('Vmax (V):'))
+        voltage_range_layout.addWidget(QLabel('Gate Voltage max (V):'))
         voltage_range_layout.addWidget(self.voltage_max_input)
+        voltage_range_layout.addWidget(QLabel('Source-Drain Voltage (V):'))
+        voltage_range_layout.addWidget(self.voltage_sd_input)
         layout.addLayout(voltage_range_layout)
 
         # Voltage step input
@@ -102,7 +125,7 @@ class VACRegime(QWidget):
         self.voltage_step_input.setRange(0.0001, 1)
         self.voltage_step_input.setValue(0.01)
         self.voltage_step_input.setDecimals(4)
-        voltage_step_layout.addWidget(QLabel('Voltage step (V):'))
+        voltage_step_layout.addWidget(QLabel('Gate Voltage step (V):'))
         voltage_step_layout.addWidget(self.voltage_step_input)
         layout.addLayout(voltage_step_layout)
 
@@ -149,12 +172,9 @@ class VACRegime(QWidget):
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
         self.iv_plot.showGrid(x=True, y=True)
-        self.abs_iv_plot = self.plot_widget.addPlot(title="|I(V)|")
-        self.abs_iv_plot.showGrid(x=True, y=True)
-
-        # Enable logarithmic scale for abs(I(V))
-        self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
-
+        self.fet_vg_plot = self.plot_widget.addPlot(title="FET(V)")
+        self.fet_vg_plot.showGrid(x=True, y=True)
+        
         layout.addWidget(self.plot_widget)
 
         self.setLayout(layout)
@@ -163,6 +183,7 @@ class VACRegime(QWidget):
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
+        self.voltage_sd = self.voltage_sd_input.value()
         try:
             self.compliance_current = eval(self.compliance_input.text())
         except:
@@ -171,33 +192,38 @@ class VACRegime(QWidget):
         self.nplc = self.nplc_input.currentText()
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
-        self.device_address = self.device_address_input.currentText()
+        self.device_gate_address = self.device_gate_address_input.currentText()
+        self.device_sd_address = self.device_sd_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
         self.current_range = self.current_range_input.currentText()
-        print('Device address: ', self.device_address)
-        # if self.device is None:
-        self.device = keithley.get_device(self.device_address.split(' ')[0], nplc=self.nplc)
+        
+        if self.device_gate_address == self.device_sd_address and (self.device_gate_address != 'Mock' or self.device_sd_address != 'Mock'):
+            QMessageBox.critical(None, "Error", f"Choose different devices for gate and source-drain.")
+        self.device_gate = keithley.get_device(self.device_gate_address.split(' ')[0], nplc=0.01)
+        self.device_sd = keithley.get_device(self.device_sd_address.split(' ')[0], nplc=self.nplc)
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-        if type(self.device) == keithley.Keithley6517B:
-            self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
+        if type(self.device_gate) == keithley.Keithley6517B:
+            self.device_gate.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
-            self.device.set_current_range(self.current_range)
+            self.device_sd.set_current_range(self.current_range)
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
         # Clear plots
         self.iv_plot.clear()
-        self.abs_iv_plot.clear()
+        self.fet_vg_plot.clear()
 
     def stop_measurement(self):
         # if reset_voltage:
         self.current_voltage = 0
-        self.device.set_voltage(0)
-        self.device.disable_output()
+        self.device_gate.set_voltage(0)
+        self.device_gate.disable_output()
+        self.device_sd.set_voltage(0)
+        self.device_sd.disable_output()
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()
@@ -205,26 +231,26 @@ class VACRegime(QWidget):
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
-
+        self.device_sd.set_voltage(self.voltage_sd)
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
         noise_currents = []  # Store the current noise
 
-        self.device.set_voltage(self.current_voltage)
+        self.device_gate.set_voltage(self.current_voltage)
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
             if p1 == 0: 
                 p1 = None
         if self.current_range == 'Auto-range':
-            current = keithley.auto_range(self.device, p1=p1)
-        total_current += self.device.read_current()
+            current = keithley.auto_range(self.device_sd, p1=p1)
+        total_current += self.device_sd.read_current()
         num_measurements += 1
             # print(f'total current at the start (p0) : {total_current}')
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
-            current = self.device.read_current(autorange=False)
+            current = self.device_sd.read_current(autorange=False)
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
@@ -267,27 +293,31 @@ class VACRegime(QWidget):
 
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
             self.current_voltage = 0
-            self.device.set_voltage(0)
+            # self.device_.set_voltage(0)
             self.stop_measurement()
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
-        voltages = [m[0] for m in self.measurements]
-        currents = [m[1] for m in self.measurements]
-        abs_currents = [abs(i) for i in currents]
+        voltages = np.array([m[0] for m in self.measurements])
+        currents = np.array([m[1] for m in self.measurements])
+        # abs_currents = [abs(i) for i in currents]
+        G = currents / voltages
+        G[voltages == 0] = np.nan
+        dG = derivative(G, self.voltage_step) / G
 
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
 
         self.iv_plot.setLabel('left', 'Current (A)')
-        self.iv_plot.setLabel('bottom', 'Voltage (V)')
+        self.iv_plot.setLabel('bottom', 'Gate Voltage (V)')
+
 
         # Update |I(V)| plot
-        self.abs_iv_plot.plot(voltages, abs_currents, pen=pg.mkPen(color='r', width=2), clear=True)
-        self.abs_iv_plot.plot(voltages, abs_currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.abs_iv_plot.setLabel('left', '|Current| (A)')
-        self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
+        self.fet_vg_plot.plot(voltages, dG, pen=pg.mkPen(color='r', width=2), clear=True)
+        self.fet_vg_plot.plot(voltages, dG, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
+        self.fet_vg_plot.setLabel('left', '1/G (dG/dVg)')
+        self.fet_vg_plot.setLabel('bottom', 'Gate Voltage (V)')
 
     def export_to_csv(self):
 
@@ -296,9 +326,9 @@ class VACRegime(QWidget):
             os.makedirs(sample_dir)
         if not op.exists(op.join(sample_dir, 'data')):
             os.makedirs(op.join(sample_dir, 'data'))
-        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.voltage_sd}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
+        df.to_csv(op.join(sample_dir, 'data', f'IVg_{name}_{self.start_time}.data'), index=False)
 
 
     def get_pandas_data(self):
@@ -311,7 +341,7 @@ class VACRegime(QWidget):
             os.makedirs(sample_dir)
         if not op.exists(op.join(sample_dir, 'plots')):
             os.makedirs(op.join(sample_dir, 'plots'))
-        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.voltage_sd}V_{self.collection_time}ms'
         df = self.get_pandas_data()
 
         up = df.where(df['Direction'] == 1).dropna().sort_values('Voltage')
@@ -325,22 +355,22 @@ class VACRegime(QWidget):
         plt.ylabel('Current (A)')
 
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'IVg_{name}_{self.start_time}.png'), dpi=300)
 
         plt.figure(figsize=(10, 6), dpi=300)
         plt.ticklabel_format(axis='y', style='scientific')
-        plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
-        plt.plot(up[up['Voltage'] >= 0]['Voltage'], np.abs(up[up['Voltage'] >= 0]['Current']), 'o-', markersize=3, color='blue', alpha=0.6)
-        plt.plot(down['Voltage'], np.abs(down['Current']), 'o-', markersize=3, label='Down', color='green', alpha=0.6)
-        plt.xlabel('Voltage (V)')
-        plt.ylabel('Current (A)')
-        plt.yscale('log')
+        plt.plot(up[up['Voltage'] < 0]['Voltage'], derivative(np.array(up[up['Voltage'] < 0]['Current']), self.voltage_step)/up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
+        plt.plot(up[up['Voltage'] >= 0]['Voltage'], derivative(np.array(up[up['Voltage'] >= 0]['Current']), self.voltage_step)/up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
+        plt.plot(down['Voltage'], derivative(np.array(down['Current']), self.voltage_step)/down['Current'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
+        plt.xlabel('Gate Voltage (V)')
+        plt.ylabel('1/G (dG/dVg)')
+        # plt.yscale('log')
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}_logscaleY.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'FETVg_{name}_{self.start_time}.png'), dpi=300)
     
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = VACRegime()
+    window = IVgRegime()
     window.show()
     sys.exit(app.exec_())

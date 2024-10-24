@@ -5,7 +5,6 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
 import pandas as pd
-from pymeasure.instruments.resources import list_resources
 import time 
 import datetime
 import matplotlib.pyplot as plt
@@ -62,7 +61,7 @@ class PulsesRegime(QWidget):
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems(list(list_resources()) + ['Mock'])
+        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
         # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
@@ -73,13 +72,13 @@ class PulsesRegime(QWidget):
         sample_name_layout.addWidget(QLabel('Sample name:'))
         sample_name_layout.addWidget(self.sample_name_input)
         layout.addLayout(sample_name_layout)
-        # Current range input
-        current_range_layout = QHBoxLayout()
-        self.current_range_input = QComboBox()
-        self.current_range_input.addItems((2 * 10.0**np.arange(-12.0, -4.0, 1.0)).astype(str))
-        current_range_layout.addWidget(QLabel('Current range (A):'))
-        current_range_layout.addWidget(self.current_range_input)
-        layout.addLayout(current_range_layout)
+        # NPLC input
+        nplc_layout = QHBoxLayout()
+        self.nplc_input = QComboBox()
+        self.nplc_input.addItems(['0.01', '0.1', '1', '10'])
+        nplc_layout.addWidget(QLabel('NPLC (1 = 20 ms):'))
+        nplc_layout.addWidget(self.nplc_input)
+        layout.addLayout(nplc_layout)
         # Voltage range input
         voltage_input = QHBoxLayout()
         self.voltage_set = QDoubleSpinBox()
@@ -115,14 +114,10 @@ class PulsesRegime(QWidget):
 
         # Compliance current input
         compliance_layout = QHBoxLayout()
-        self.compliance_input = QDoubleSpinBox()
-        self.compliance_input.setRange(1e-11, 1e11)
-        self.compliance_input.setValue(1e-9)
-        self.compliance_input.setDecimals(6)
+        self.compliance_input = QLineEdit()
         compliance_layout.addWidget(QLabel('Compliance current (A):'))
         compliance_layout.addWidget(self.compliance_input)
         layout.addLayout(compliance_layout)
-
 
         # Start/Stop button
         button_layout = QHBoxLayout()
@@ -136,7 +131,10 @@ class PulsesRegime(QWidget):
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
+        self.plot_widget.setBackground('w')
 
+        # I(V) plot
+        pg.setConfigOption('background', 'w')
         # First row
         self.curr_set_plot = self.plot_widget.addPlot(title="Current Set")
         self.curr_read_plot = self.plot_widget.addPlot(title="Current Read")
@@ -158,18 +156,17 @@ class PulsesRegime(QWidget):
         self.v_read_set = self.voltage_read_set.value()
         self.v_reset = self.voltage_reset.value()
         self.v_read_reset = self.voltage_read_reset.value()
-        self.compliance_current = self.compliance_input.value()
-        # self.collection_time = self.collection_time_input.value()
+        try:
+            self.compliance_current = eval(self.compliance_input.text())
+        except:
+            QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
+            return
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.device_address_input.currentText()
         self.sample_name = self.sample_name_input.text()
-        self.current_range = self.current_range_input.currentText()
+        self.nplc = self.nplc_input.currentText()
         print('Device address: ', self.device_address)
-        if self.device is None:
-            if self.device_address == 'Mock':
-                self.device = keithley.Keithley6517B_Mock()
-            else:
-                self.device = keithley.Keithley6517B(self.device_address, nplc=0.1)
+        self.device = keithley.get_device(self.device_address.split(' ')[0], nplc=self.nplc)
         time.sleep(1)
         # Clear previous measurements and noise data
         self.voltages = []
@@ -180,8 +177,8 @@ class PulsesRegime(QWidget):
         # self.current_voltage = self.voltage_min
         self.current_voltage = 0
         self.start_time = time.time()
-        self.device.set_voltage_range(max(abs(self.v_set), abs(self.v_reset)))
-        self.device.set_current_range(self.current_range)
+        if type(self.device) == keithley.Keithley6517B:
+            self.device.set_voltage_range(max(abs(self.v_set), abs(self.v_reset)))
         self.timer.start(100)  # Update every 100 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
@@ -204,22 +201,22 @@ class PulsesRegime(QWidget):
         # SET
         self.device.set_voltage(self.v_set)
         self.voltages.append(self.v_set)
-        self.i_set.append(self.device.read_current())
+        self.i_set.append(keithley.auto_range(self.device, p1=None if len(self.i_set) == 0 else self.i_set[-1]))
         self.device.set_voltage(0)
         # READ
         self.device.set_voltage(self.v_read_set)
         self.voltages.append(self.v_read_set)
-        self.i_read_set.append(self.device.read_current())
+        self.i_read_set.append(keithley.auto_range(self.device, p1=None if len(self.i_read_set) == 0 else self.i_read_set[-1]))
         self.device.set_voltage(0)
         # RESET
         self.device.set_voltage(self.v_reset)
         self.voltages.append(self.v_reset)
-        self.i_reset.append(self.device.read_current())
+        self.i_reset.append(keithley.auto_range(self.device, p1=None if len(self.i_reset) == 0 else self.i_reset[-1]))
         self.device.set_voltage(0)
         # READ
         self.device.set_voltage(self.v_read_reset)
         self.voltages.append(self.v_read_reset)
-        self.i_read_reset.append(self.device.read_current())
+        self.i_read_reset.append(keithley.auto_range(self.device, p1=None if len(self.i_read_reset) == 0 else self.i_read_reset[-1]))
         self.device.set_voltage(0)
         # Update plots
         self.update_plots()
