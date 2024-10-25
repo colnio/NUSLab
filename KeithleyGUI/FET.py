@@ -63,7 +63,7 @@ class IVgRegime(QWidget):
 
     def initUI(self):
         
-        self.setWindowTitle('Keithley IV')
+        self.setWindowTitle('Keithley IVg')
         layout = QVBoxLayout()
 
         # keithley 
@@ -172,8 +172,8 @@ class IVgRegime(QWidget):
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
         self.iv_plot.showGrid(x=True, y=True)
-        self.fet_vg_plot = self.plot_widget.addPlot(title="FET(V)")
-        self.fet_vg_plot.showGrid(x=True, y=True)
+        self.leakage_plot = self.plot_widget.addPlot(title="Gate (Leakage) I(V)")
+        self.leakage_plot.showGrid(x=True, y=True)
         
         layout.addWidget(self.plot_widget)
 
@@ -200,7 +200,7 @@ class IVgRegime(QWidget):
         print(f"Gate device : {self.device_sd_address}")
         if self.device_gate_address == self.device_sd_address and (self.device_gate_address != 'Mock' or self.device_sd_address != 'Mock'):
             QMessageBox.critical(None, "Error", f"Choose different devices for gate and source-drain.")
-        self.device_gate = keithley.get_device(self.device_gate_address, nplc=0.01)
+        self.device_gate = keithley.get_device(self.device_gate_address, nplc=self.nplc)
         self.device_sd = keithley.get_device(self.device_sd_address, nplc=self.nplc)
 
         if self.device_gate == None:
@@ -224,7 +224,7 @@ class IVgRegime(QWidget):
 
         # Clear plots
         self.iv_plot.clear()
-        self.fet_vg_plot.clear()
+        self.leakage_plot.clear()
         self.direction = 1
 
     def stop_measurement(self):
@@ -237,7 +237,6 @@ class IVgRegime(QWidget):
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()
-        self.direction = 1
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
@@ -264,21 +263,23 @@ class IVgRegime(QWidget):
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
-
+        
         # Calculate the average current during the collection time
         if num_measurements > 0:
             average_current = total_current / num_measurements
         else:
             average_current = 0
 
+        leakage = keithley.auto_range(self.device_gate, p1 = None if len(self.measurements) == 0 else self.measurements[-1][2])
         # Check compliance current
-        if abs(average_current) >= self.compliance_current:
+        
+        if abs(average_current) >= self.compliance_current or abs(leakage) >= self.compliance_current:
             # self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
             self.stop_measurement()
             QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current, self.direction))
+        self.measurements.append((self.current_voltage, average_current, leakage, self.direction))
         self.noise_data.append(noise_currents)
 
         # Update plots
@@ -310,11 +311,8 @@ class IVgRegime(QWidget):
         # Get I(V) and abs(I(V)) data
         voltages = np.array([m[0] for m in self.measurements])
         currents = np.array([m[1] for m in self.measurements])
-        # abs_currents = [abs(i) for i in currents]
-        G = currents / voltages
-        G[voltages == 0] = np.nan
-        dG = derivative(G, self.voltage_step) / G
-
+        currents_leak = np.array([m[2] for m in self.measurements])
+        
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
@@ -324,10 +322,10 @@ class IVgRegime(QWidget):
 
 
         # Update |I(V)| plot
-        self.fet_vg_plot.plot(voltages, dG, pen=pg.mkPen(color='r', width=2), clear=True)
-        self.fet_vg_plot.plot(voltages, dG, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.fet_vg_plot.setLabel('left', '1/G (dG/dVg)')
-        self.fet_vg_plot.setLabel('bottom', 'Gate Voltage (V)')
+        self.leakage_plot.plot(voltages, currents_leak, pen=pg.mkPen(color='r', width=2), clear=True)
+        self.leakage_plot.plot(voltages, currents_leak, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
+        self.leakage_plot.setLabel('left', 'Current (A)')
+        self.leakage_plot.setLabel('bottom', 'Gate Voltage (V)')
 
     def export_to_csv(self):
 
@@ -342,7 +340,7 @@ class IVgRegime(QWidget):
 
 
     def get_pandas_data(self):
-        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Leakage', 'Direction'])
         return df
 
     def make_plot(self):
@@ -369,14 +367,14 @@ class IVgRegime(QWidget):
 
         plt.figure(figsize=(10, 6), dpi=300)
         plt.ticklabel_format(axis='y', style='scientific')
-        plt.plot(up[up['Voltage'] < 0]['Voltage'], derivative(np.array(up[up['Voltage'] < 0]['Current']), self.voltage_step)/up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
-        plt.plot(up[up['Voltage'] >= 0]['Voltage'], derivative(np.array(up[up['Voltage'] >= 0]['Current']), self.voltage_step)/up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
-        plt.plot(down['Voltage'], derivative(np.array(down['Current']), self.voltage_step)/down['Current'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
+        plt.plot(up[up['Voltage'] < 0]['Voltage'], up[up['Voltage'] < 0]['Leakage'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
+        plt.plot(up[up['Voltage'] >= 0]['Voltage'], up[up['Voltage'] >= 0]['Leakage'], 'o-', markersize=3, color='blue', alpha=0.6)
+        plt.plot(down['Voltage'], down['Leakage'], 'o-', markersize=3, label='Down', color='green', alpha=0.6)
         plt.xlabel('Gate Voltage (V)')
-        plt.ylabel('1/G (dG/dVg)')
+        plt.ylabel('Current (A)')
         # plt.yscale('log')
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'FETVg_{name}_{self.start_time}.png'), dpi=300)
+        plt.savefig(op.join(sample_dir, 'plots', f'LeakVg_{name}_{self.start_time}.png'), dpi=300)
     
 
 if __name__ == '__main__':
