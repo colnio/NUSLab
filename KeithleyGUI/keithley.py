@@ -17,7 +17,7 @@ def auto_range(device, p1=None):
     else:
         device.set_current_range(find_range(abs(p1) * 3))
         c = device.read_current()
-    return c if c < 10 else device.read_current(autorange=True)
+    return c if abs(c) < 20e-3 else device.read_current(autorange=True)
 
 def get_device(gpib_address, nplc):
     device = None
@@ -68,6 +68,7 @@ class Keithley6517B:
         self.device.write(":SENS:FUNC 'CURR';")
         self.device.write(f":SENS:CURR:NPLC {nplc}")
         self.device.write(':SOUR:VOLT:MCON 1;')
+        self.output_enabled = False
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -98,14 +99,17 @@ class Keithley6517B:
         :param voltage_value: Voltage to set (in volts).
         """
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
-        self.device.write('OUTP ON')  # Turn the output on
-        # print(f"Voltage set to {voltage_value} V and output enabled")
+        if not self.output_enabled:
+            self.device.write('OUTP ON')  # Turn the output on
+            self.output_enabled = True
+            time.sleep(1)
 
     def disable_output(self):
         """
         Set the output voltage.
         :param voltage_value: Voltage to set (in volts).
         """
+        self.output_enabled = False
         self.device.write('OUTP OFF')  # Turn the output on
 
     def read_current(self, autorange=False):
@@ -145,17 +149,17 @@ class Keithley6430:
         self.rm = pyvisa.ResourceManager()
         self.device = self.rm.open_resource(f'{gpib_address}')
         self.device.timeout = 5000  # Timeout for commands, can be adjusted if needed
+        self.output_enabled = False
         self.clear_buffer()
         self.init_device(nplc)
         
     def init_device(self, nplc):
         self.device.write('*CLS;')
         self.device.write('*RST;')
-        # self.device.write("SYST:ZCH OFF;")
         self.device.write(":SENS:FUNC 'CURR';")
         self.device.write(f":SENS:CURR:NPLC {nplc}")
         self.device.write(f":SOUR:VOLT:MODE FIX")
-        # self.device.write(':SOUR:VOLT:MCON 1;')
+        self.output_enabled = False
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -186,14 +190,16 @@ class Keithley6430:
         :param voltage_value: Voltage to set (in volts).
         """
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
-        self.device.write('OUTP ON')  # Turn the output on
-        # print(f"Voltage set to {voltage_value} V and output enabled")
+        if not self.output_enabled:
+            self.device.write('OUTP ON')  # Turn the output on
+            self.output_enabled = True
 
     def disable_output(self):
         """
         Set the output voltage.
         :param voltage_value: Voltage to set (in volts).
         """
+        self.output_enabled = False
         self.device.write('OUTP OFF')  # Turn the output on
 
     def read_current(self, autorange=False):

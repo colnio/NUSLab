@@ -20,7 +20,6 @@ class VACRegime(QWidget):
         # Initialize simulation variables
         self.device = None
         self.sample_name = ''
-        # self.device = keithley.Keithley6517B('GPIB0::27::INSTR')
         self.device_address = ''
         self.voltage_min = 0
         self.voltage_max = 1
@@ -44,7 +43,6 @@ class VACRegime(QWidget):
         # date & make folder
         self.date = str(datetime.date.today())
         self.folder = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
-
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
@@ -58,7 +56,6 @@ class VACRegime(QWidget):
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
         self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
-        # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
         layout.addLayout(device_address_layout)
@@ -156,7 +153,6 @@ class VACRegime(QWidget):
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
 
         layout.addWidget(self.plot_widget)
-
         self.setLayout(layout)
 
     def start_measurement(self):
@@ -176,7 +172,6 @@ class VACRegime(QWidget):
         self.current_range = self.current_range_input.currentText()
         self.direction = 1
         print('Device address: ', self.device_address)
-        # if self.device is None:
         self.device = keithley.get_device(self.device_address, nplc=self.nplc)
         # Clear previous measurements and noise data
         self.measurements = []
@@ -192,13 +187,11 @@ class VACRegime(QWidget):
             self.device.set_current_range(self.current_range)
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
-
         # Clear plots
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
 
     def stop_measurement(self):
-        # if reset_voltage:
         self.current_voltage = 0
         self.device.set_voltage(0)
         self.device.disable_output()
@@ -209,7 +202,6 @@ class VACRegime(QWidget):
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
-
         start_time = self.elapsed_timer.elapsed()
         total_current = 0
         num_measurements = 0
@@ -225,33 +217,26 @@ class VACRegime(QWidget):
             current = keithley.auto_range(self.device, p1=p1)
         total_current += self.device.read_current()
         num_measurements += 1
-            # print(f'total current at the start (p0) : {total_current}')
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
             # Set the voltage and get the current multiple times to average
             current = self.device.read_current(autorange=False)
             total_current += current
             noise_currents.append(current)  # Collect the noise data
             num_measurements += 1
-
         # Calculate the average current during the collection time
         if num_measurements > 0:
             average_current = total_current / num_measurements
         else:
             average_current = 0
-
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
-            # self.device.set_voltage(0)  # Set voltage to 0 if compliance exceeded
             self.stop_measurement()
             QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
-
         # Store the data (voltage, average current)
         self.measurements.append((self.current_voltage, average_current, self.direction))
         self.noise_data.append(noise_currents)
-
         # Update plots
         self.update_plots()
-
         # Move to the next voltage step
         self.current_voltage += self.voltage_step * self.direction
 
@@ -264,10 +249,6 @@ class VACRegime(QWidget):
             self.current_voltage = self.voltage_min
             self.direction *= -1
             self.n_runs -= 1
-
-        # if self.n_runs <= 0 and self.current_voltage == 0:
-        #     self.device.set_voltage(0)
-        #     self.stop_measurement()
 
         if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
             self.current_voltage = 0
