@@ -36,6 +36,7 @@ def get_device(gpib_address, nplc):
 
 def get_devices_list():
     l = []
+    a = None
     rm = ResourceManager()
     try : 
         a = rm.list_resources()
@@ -45,7 +46,8 @@ def get_devices_list():
     for r in a:
         try:
             res = rm.open_resource(r)
-            id = res.query('*idn?')
+            res.write('*CLS;*RST;*IDN?;')
+            id = res.read()
         except:
             id = 'Unkown'
         if 'keithley' in id.lower():
@@ -72,7 +74,7 @@ class Keithley6517B:
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
-        self.device.write('*CLS')
+        self.device.write('*CLS;')
 
     def set_voltage_range(self, range_value):
         """
