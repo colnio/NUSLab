@@ -10,6 +10,9 @@ import datetime
 import matplotlib.pyplot as plt
 import os.path as op
 import os 
+import matplotlib
+import gc
+matplotlib.use('Agg')
 
 def derivative(arr, step):
     if len(arr) == 1:
@@ -375,6 +378,8 @@ class IVgRegime(QWidget):
         # plt.yscale('log')
         plt.legend()
         plt.savefig(op.join(sample_dir, 'plots', f'LeakVg_{name}_{self.start_time}.png'), dpi=300)
+        plt.close('all')
+        gc.collect()
     
 
 if __name__ == '__main__':

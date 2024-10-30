@@ -1,4 +1,6 @@
 import sys
+import matplotlib
+import matplotlib.pyplot
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
@@ -10,7 +12,8 @@ import datetime
 import matplotlib.pyplot as plt
 import os.path as op
 import os 
-
+import gc
+matplotlib.use('Agg')
 
 
 class VACRegime(QWidget):
@@ -284,6 +287,7 @@ class VACRegime(QWidget):
         name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
+        del df
 
 
     def get_pandas_data(self):
@@ -301,7 +305,7 @@ class VACRegime(QWidget):
 
         up = df.where(df['Direction'] == 1).dropna().sort_values('Voltage')
         down = df.where(df['Direction'] == -1).dropna().sort_values('Voltage')
-        plt.figure(figsize=(10, 6), dpi=300)
+        f1 = plt.figure(figsize=(10, 6), dpi=300)
         plt.ticklabel_format(axis='y', style='scientific')
         plt.plot(up[up['Voltage'] < 0]['Voltage'], up[up['Voltage'] < 0]['Current'], 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], up[up['Voltage'] >= 0]['Current'], 'o-', markersize=3, color='blue', alpha=0.6)
@@ -311,8 +315,9 @@ class VACRegime(QWidget):
 
         plt.legend()
         plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}.png'), dpi=300)
+        f1.clf()
 
-        plt.figure(figsize=(10, 6), dpi=300)
+        f2 = plt.figure(figsize=(10, 6), dpi=300)
         plt.ticklabel_format(axis='y', style='scientific')
         plt.plot(up[up['Voltage'] < 0]['Voltage'], np.abs(up[up['Voltage'] < 0]['Current']), 'o-', markersize=3, label='Up', color='blue', alpha=0.6)
         plt.plot(up[up['Voltage'] >= 0]['Voltage'], np.abs(up[up['Voltage'] >= 0]['Current']), 'o-', markersize=3, color='blue', alpha=0.6)
@@ -322,6 +327,13 @@ class VACRegime(QWidget):
         plt.yscale('log')
         plt.legend()
         plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}_logscaleY.png'), dpi=300)
+        del df, up, down
+        f2.clf()
+        matplotlib.pyplot.close(f1)
+        matplotlib.pyplot.close(f2)
+        plt.close('all')
+        gc.collect()
+        # matplotlib.pyplot.clf()
     
 
 if __name__ == '__main__':

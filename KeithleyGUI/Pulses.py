@@ -10,6 +10,9 @@ import datetime
 import matplotlib.pyplot as plt
 import os.path as op
 import os 
+import gc
+import matplotlib
+matplotlib.use('Agg')
 
 class PulsesRegime(QWidget):
     def __init__(self):
@@ -305,6 +308,8 @@ class PulsesRegime(QWidget):
 
         plt.legend()
         plt.savefig(op.join(sample_dir, 'plots', f'PULSES_{name}_{self.start_time}.png'), dpi=300)
+        plt.close('all')
+        gc.collect()
     
 
 if __name__ == '__main__':
