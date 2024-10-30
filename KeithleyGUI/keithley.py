@@ -89,6 +89,8 @@ class Keithley6517B:
         Set the current range.
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
+        if range_value > 20e-3:
+            return
         self.device.write(f'CURR:RANG {range_value};')
     
     def get_current_range(self):
@@ -161,6 +163,7 @@ class Keithley6430:
         self.device.write(":SENS:FUNC 'CURR';")
         self.device.write(f":SENS:CURR:NPLC {nplc}")
         self.device.write(f":SOUR:VOLT:MODE FIX")
+        self.device.write(f":SENS:CURR:PROT 105e-3;")
         self.output_enabled = False
 
     def clear_buffer(self):
@@ -180,6 +183,8 @@ class Keithley6430:
         Set the current range.
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
+        if range_value > 105e-3:
+            return
         self.device.write(f'CURR:RANG {range_value};')
     
     def get_current_range(self):
