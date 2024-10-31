@@ -4,7 +4,7 @@ import matplotlib.pyplot
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
-from PyQt5.QtCore import QTimer, QElapsedTimer
+from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
 import pandas as pd
 import time 
@@ -135,9 +135,14 @@ class VACRegime(QWidget):
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
         self.start_button.clicked.connect(self.start_measurement)
+        self.voltage_now = QLabel('0 V')
+        self.voltage_now.setAlignment(Qt.AlignCenter)
+        self.voltage_now.setStyleSheet("background-color: lightgray") 
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
+        # button_layout.addWidget(QLabel('Voltage now: '))
+        button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
 
@@ -197,6 +202,7 @@ class VACRegime(QWidget):
     def stop_measurement(self):
         self.current_voltage = 0
         self.device.set_voltage(0)
+        self.voltage_now.setText('0 V')
         self.device.disable_output()
         self.timer.stop()
         self.make_plot()
@@ -211,6 +217,7 @@ class VACRegime(QWidget):
         noise_currents = []  # Store the current noise
 
         self.device.set_voltage(self.current_voltage)
+        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
