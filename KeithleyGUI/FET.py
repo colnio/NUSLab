@@ -106,13 +106,16 @@ class FETRegime(QWidget):
         # Voltage range input
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
-        self.voltage_min_input.setRange(-10, 10)
+        self.voltage_min_input.setRange(-100, 100)
+        self.voltage_min_input.setDecimals(2)
         self.voltage_min_input.setValue(-1)
         self.voltage_max_input = QDoubleSpinBox()
-        self.voltage_max_input.setRange(-10, 10)
+        self.voltage_max_input.setRange(-100, 100)
+        self.voltage_max_input.setDecimals(2)
         self.voltage_max_input.setValue(1)
         self.voltage_sd_input = QDoubleSpinBox()
         self.voltage_sd_input.setRange(-10, 10)
+        self.voltage_sd_input.setDecimals(4)
         self.voltage_sd_input.setValue(0.01)
         voltage_range_layout.addWidget(QLabel('Gate Voltage min (V):'))
         voltage_range_layout.addWidget(self.voltage_min_input)
@@ -393,6 +396,6 @@ class FETRegime(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = IVgRegime()
+    window = FETRegime()
     window.show()
     sys.exit(app.exec_())
