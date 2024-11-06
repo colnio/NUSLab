@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
-from PyQt5.QtCore import QTimer, QElapsedTimer
+from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
 import pandas as pd
 import time 
@@ -28,7 +28,7 @@ def derivative(arr, step):
         outp[i] = out / step
     return outp
 
-class IVgRegime(QWidget):
+class FETRegime(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -66,7 +66,7 @@ class IVgRegime(QWidget):
 
     def initUI(self):
         
-        self.setWindowTitle('Keithley IVg')
+        self.setWindowTitle('Keithley FET')
         layout = QVBoxLayout()
 
         # keithley 
@@ -163,7 +163,14 @@ class IVgRegime(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.clicked.connect(self.stop_measurement)
+        self.voltage_now = QLabel('0 V')
+        self.voltage_now.setAlignment(Qt.AlignCenter)
+        self.voltage_now.setStyleSheet("background-color: lightgray") 
+        self.stop_button = QPushButton('Stop Measurement')
+        self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
+        # button_layout.addWidget(QLabel('Voltage now: '))
+        button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
 
@@ -236,6 +243,7 @@ class IVgRegime(QWidget):
         self.device_gate.set_voltage(0)
         self.device_gate.disable_output()
         self.device_sd.set_voltage(0)
+        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
         self.device_sd.disable_output()
         self.timer.stop()
         self.make_plot()
@@ -250,6 +258,7 @@ class IVgRegime(QWidget):
         noise_currents = []  # Store the current noise
 
         self.device_gate.set_voltage(self.current_voltage)
+        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
