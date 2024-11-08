@@ -2,14 +2,31 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type Attachment struct {
+	ID           int
+	SampleID     int
+	Address      string
+	UploadedAt   time.Time
+	OriginalName string // Added to store original filename
+	ContentType  string // Added to store file type
+	IsImage      bool
+}
 
 // Sample represents a sample record in the database
 type Sample struct {
@@ -19,6 +36,7 @@ type Sample struct {
 	Keywords    string
 	Owner       string
 	Sample_prep string
+	Attachments []Attachment
 }
 
 // Initialize a global database connection pool
@@ -35,11 +53,11 @@ func main() {
 	defer dbPool.Close()
 
 	// Start server
-
 	http.HandleFunc("/", mainPageHandler)
-	http.HandleFunc("/samples/edit/", editSampleHandler)
-	http.HandleFunc("/samples/", sampleDetailHandler) // Handle viewing sample details
 	http.HandleFunc("/samples/new", newSampleHandler)
+	http.HandleFunc("/samples/edit/", editSampleHandler)
+	http.HandleFunc("/samples/", handleSample)
+	http.HandleFunc("/attachment/", handleAttachment)
 
 	fmt.Println("Server started at :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -75,6 +93,81 @@ func mainPageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmpl.Execute(w, samples)
+}
+
+// Update handleSample function to properly handle the upload path pattern
+func handleSample(w http.ResponseWriter, r *http.Request) {
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/samples/"), "/")
+	if len(pathParts) < 1 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+
+	// Handle upload requests: /samples/{id}/upload
+	if len(pathParts) == 2 && pathParts[1] == "upload" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed for upload", http.StatusMethodNotAllowed)
+			return
+		}
+		uploadAttachmentHandler(w, r)
+		return
+	}
+
+	// Handle sample detail view: /samples/{id}
+	if len(pathParts) == 1 {
+		sampleDetailHandler(w, r)
+		return
+	}
+
+	http.Error(w, "Invalid URL", http.StatusBadRequest)
+}
+
+// Update uploadAttachmentHandler to correctly get the sample ID from the URL
+func uploadAttachmentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get sample ID from URL (/samples/{id}/upload)
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/samples/"), "/")
+	if len(pathParts) != 2 || pathParts[1] != "upload" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	sampleID := pathParts[0]
+
+	// Parse multipart form
+	err := r.ParseMultipartForm(10 << 20) // 10 MB max
+	if err != nil {
+		http.Error(w, "Error parsing form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Error retrieving file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Save file and get filepath
+	filepath, err := saveUploadedFile(file, header.Filename)
+	if err != nil {
+		http.Error(w, "Error saving file", http.StatusInternalServerError)
+		return
+	}
+
+	// Add to database
+	err = addAttachment(sampleID, filepath)
+	if err != nil {
+		fmt.Println(err)
+		http.Error(w, "Error storing attachment info", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to sample detail page
+	http.Redirect(w, r, "/samples/"+sampleID, http.StatusSeeOther)
 }
 
 // searchSamples queries the database for samples by name or keywords
@@ -190,13 +283,18 @@ func sampleDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 	tmpl.Execute(w, sample)
 }
-
-// getSampleByID retrieves a sample from the database by its ID
 func getSampleByID(sampleID string) (Sample, error) {
 	var sample Sample
 	err := dbPool.QueryRow(context.Background(),
-		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') FROM samples WHERE sample_id=$1`, sampleID).Scan(
+		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') 
+         FROM samples WHERE sample_id=$1`, sampleID).Scan(
 		&sample.ID, &sample.Name, &sample.Description, &sample.Keywords, &sample.Owner, &sample.Sample_prep)
+	if err != nil {
+		return sample, err
+	}
+
+	// Fetch attachments
+	sample.Attachments, err = getAttachments(sampleID)
 	return sample, err
 }
 
@@ -281,4 +379,250 @@ func newSampleHandler(w http.ResponseWriter, r *http.Request) {
 		// Return 405 Method Not Allowed for other methods
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// generateUniqueFilename creates a unique filename with original extension
+func generateUniqueFilename(originalName string) (string, error) {
+	// Generate 16 random bytes
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	// Keep original file extension
+	ext := filepath.Ext(originalName)
+	return hex.EncodeToString(bytes) + ext, nil
+}
+
+// saveUploadedFile saves the file to disk and returns the file path
+func saveUploadedFile(file io.Reader, originalName string) (string, error) {
+	// Create uploads directory if it doesn't exist
+	uploadDir := "uploads"
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		return "", err
+	}
+
+	// Generate unique filename
+	filename, err := generateUniqueFilename(originalName)
+	if err != nil {
+		return "", err
+	}
+
+	filepath := filepath.Join(uploadDir, filename)
+
+	// Create new file
+	dst, err := os.Create(filepath)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+
+	// Copy file content
+	if _, err = io.Copy(dst, file); err != nil {
+		return "", err
+	}
+
+	return filepath, nil
+}
+
+// getAttachments retrieves all attachments for a sample
+func getAttachments(sampleID string) ([]Attachment, error) {
+	rows, err := dbPool.Query(context.Background(),
+		`SELECT attachment_id, sample_id, attachment_address, uploaded_at 
+         FROM attachments 
+         WHERE sample_id = $1`,
+		sampleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attachments []Attachment
+	for rows.Next() {
+		var att Attachment
+		err := rows.Scan(&att.ID, &att.SampleID, &att.Address, &att.UploadedAt)
+		if err != nil {
+			return nil, err
+		}
+		// Extract original filename from path
+		att.OriginalName = filepath.Base(att.Address)
+		// Determine content type
+		att.ContentType = mime.TypeByExtension(filepath.Ext(att.Address))
+		att.IsImage = isImage(att.ContentType)
+		attachments = append(attachments, att)
+	}
+	return attachments, nil
+}
+
+// addAttachment stores a new attachment in the database
+func addAttachment(sampleID string, filepath string) error {
+	_, err := dbPool.Exec(context.Background(),
+		`INSERT INTO attachments (sample_id, attachment_address) 
+         VALUES ($1, $2)`,
+		sampleID, filepath)
+	return err
+}
+
+// deleteAttachment removes an attachment from both database and filesystem
+func deleteAttachment(attachmentID string) error {
+	// First get the file path
+	var filepath string
+	err := dbPool.QueryRow(context.Background(),
+		"SELECT attachment_address FROM attachments WHERE attachment_id = $1",
+		attachmentID).Scan(&filepath)
+	if err != nil {
+		return err
+	}
+
+	// Delete from database
+	_, err = dbPool.Exec(context.Background(),
+		"DELETE FROM attachments WHERE attachment_id = $1",
+		attachmentID)
+	if err != nil {
+		return err
+	}
+
+	// Delete file from filesystem
+	return os.Remove(filepath)
+
+}
+
+// isImage checks if a file is an image based on its content type
+func isImage(contentType string) bool {
+	return strings.HasPrefix(contentType, "image/")
+}
+
+// Add these handler functions to your main.go:
+
+// func uploadAttachmentHandler(w http.ResponseWriter, r *http.Request) {
+// 	if r.Method != http.MethodPost {
+// 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// 		return
+// 	}
+
+// 	// Get sample ID from URL
+// 	parts := strings.Split(r.URL.Path, "/")
+// 	if len(parts) < 4 {
+// 		http.Error(w, "Invalid URL", http.StatusBadRequest)
+// 		return
+// 	}
+// 	sampleID := parts[3]
+
+// 	// Parse multipart form
+// 	err := r.ParseMultipartForm(10 << 20) // 10 MB max
+// 	if err != nil {
+// 		http.Error(w, "Error parsing form", http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	file, header, err := r.FormFile("file")
+// 	if err != nil {
+// 		http.Error(w, "Error retrieving file", http.StatusBadRequest)
+// 		return
+// 	}
+// 	defer file.Close()
+
+// 	// Save file and get filepath
+// 	filepath, err := saveUploadedFile(file, header.Filename)
+// 	if err != nil {
+// 		http.Error(w, "Error saving file", http.StatusInternalServerError)
+// 		return
+// 	}
+
+// 	// Add to database
+// 	err = addAttachment(sampleID, filepath)
+// 	if err != nil {
+// 		http.Error(w, "Error storing attachment info", http.StatusInternalServerError)
+// 		return
+// 	}
+
+// 	// Redirect back to sample detail page
+// 	http.Redirect(w, r, "/samples/"+sampleID, http.StatusSeeOther)
+// }
+
+func downloadAttachmentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get attachment ID from URL
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	attachmentID := parts[2]
+
+	// Get file path from database
+	var filepath string
+	err := dbPool.QueryRow(context.Background(),
+		"SELECT attachment_address FROM attachments WHERE attachment_id = $1",
+		attachmentID).Scan(&filepath)
+	if err != nil {
+		http.Error(w, "Attachment not found", http.StatusNotFound)
+		return
+	}
+
+	// Serve the file
+	http.ServeFile(w, r, filepath)
+}
+
+func deleteAttachmentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get attachment ID from URL
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	attachmentID := parts[2]
+
+	// Get sample ID before deleting the attachment
+	var sampleID string
+	err := dbPool.QueryRow(context.Background(),
+		"SELECT sample_id FROM attachments WHERE attachment_id = $1",
+		attachmentID).Scan(&sampleID)
+	if err != nil {
+		http.Error(w, "Error getting sample ID", http.StatusInternalServerError)
+		return
+	}
+
+	// Delete the attachment
+	err = deleteAttachment(attachmentID)
+	if err != nil {
+		http.Error(w, "Error deleting attachment", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to the sample page
+	http.Redirect(w, r, "/samples/"+sampleID, http.StatusSeeOther)
+}
+
+func handleAttachment(w http.ResponseWriter, r *http.Request) {
+	pathParts := strings.Split(r.URL.Path, "/")
+	if len(pathParts) < 3 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this is a delete request
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/delete") {
+		// Remove "/delete" from the end to get the attachment ID
+		// attachmentID := pathParts[2]
+		deleteAttachmentHandler(w, r)
+		return
+	}
+
+	// Handle download request
+	if r.Method == http.MethodGet {
+		downloadAttachmentHandler(w, r)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }

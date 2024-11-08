@@ -8,3 +8,4 @@ CREATE TABLE attachments (
 );
 grant all on schema public to app;
 grant all on attachments to app;
+grant all on attachments_attachment_id_seq to app;

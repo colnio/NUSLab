@@ -170,3 +170,5 @@ sampleDB/go.mod
 sampleDB/go.sum
 go.mod
 go.sum
+
+sampleDB/uploads/*
