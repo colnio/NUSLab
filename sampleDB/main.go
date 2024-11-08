@@ -18,6 +18,7 @@ type Sample struct {
 	Description string
 	Keywords    string
 	Owner       string
+	Sample_prep string
 }
 
 // Initialize a global database connection pool
@@ -61,6 +62,7 @@ func mainPageHandler(w http.ResponseWriter, r *http.Request) {
 		// Otherwise, fetch all samples
 		samples, err = getAllSamples()
 		if err != nil {
+			fmt.Printf("%v\n", err)
 			http.Error(w, "Error retrieving samples", http.StatusInternalServerError)
 			return
 		}
@@ -122,7 +124,7 @@ func searchSamples(query string) ([]Sample, error) {
 // getAllSamples retrieves all samples when there’s no search query
 func getAllSamples() ([]Sample, error) {
 	rows, err := dbPool.Query(context.Background(),
-		"SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner FROM samples")
+		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') FROM samples`)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +133,7 @@ func getAllSamples() ([]Sample, error) {
 	var samples []Sample
 	for rows.Next() {
 		var sample Sample
-		err := rows.Scan(&sample.ID, &sample.Name, &sample.Description, &sample.Keywords, &sample.Owner)
+		err := rows.Scan(&sample.ID, &sample.Name, &sample.Description, &sample.Keywords, &sample.Owner, &sample.Sample_prep)
 		if err != nil {
 			return nil, err
 		}
@@ -193,8 +195,8 @@ func sampleDetailHandler(w http.ResponseWriter, r *http.Request) {
 func getSampleByID(sampleID string) (Sample, error) {
 	var sample Sample
 	err := dbPool.QueryRow(context.Background(),
-		"SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner FROM samples WHERE sample_id=$1", sampleID).Scan(
-		&sample.ID, &sample.Name, &sample.Description, &sample.Keywords, &sample.Owner)
+		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') FROM samples WHERE sample_id=$1`, sampleID).Scan(
+		&sample.ID, &sample.Name, &sample.Description, &sample.Keywords, &sample.Owner, &sample.Sample_prep)
 	return sample, err
 }
 
@@ -219,12 +221,15 @@ func editSampleHandler(w http.ResponseWriter, r *http.Request) {
 	description := r.FormValue("description")
 	keywords := r.FormValue("keywords")
 	owner := r.FormValue("owner")
+	sample_prep := r.FormValue("sample_prep")
 
+	// fmt.Println(name, description, keywords, owner, sample_prep)
 	// Update sample in the database
 	_, err = dbPool.Exec(context.Background(),
-		"UPDATE samples SET sample_name=$1, sample_description=$2, sample_keywords=$3, sample_owner=$4 WHERE sample_id=$5",
-		name, description, keywords, owner, sampleID)
+		"UPDATE samples SET sample_name=$1, sample_description=$2, sample_keywords=$3, sample_owner=$4, sample_prep=$6 WHERE sample_id=$5",
+		name, description, keywords, owner, sampleID, sample_prep)
 	if err != nil {
+		fmt.Println(err)
 		http.Error(w, "Error updating sample", http.StatusInternalServerError)
 		return
 	}
@@ -243,32 +248,6 @@ func newSampleFormHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, nil)
 }
 
-// createSampleHandler processes the new sample form submission
-func createSampleHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Parse form data
-	name := r.FormValue("name")
-	description := r.FormValue("description")
-	keywords := r.FormValue("keywords")
-	owner := r.FormValue("owner")
-
-	// Insert the new sample into the database
-	_, err := dbPool.Exec(context.Background(),
-		"INSERT INTO samples (sample_name, sample_description, sample_keywords, sample_owner) VALUES ($1, $2, $3, $4)",
-		name, description, keywords, owner)
-	if err != nil {
-		http.Error(w, "Error adding sample", http.StatusInternalServerError)
-		return
-	}
-
-	// Redirect to the main page to show the new sample
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
 // newSampleHandler handles both displaying the form and processing the submission
 func newSampleHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -285,11 +264,11 @@ func newSampleHandler(w http.ResponseWriter, r *http.Request) {
 		description := r.FormValue("description")
 		keywords := r.FormValue("keywords")
 		owner := r.FormValue("owner")
-
+		prep := r.FormValue("sample_prep")
 		// Insert the new sample into the database
 		_, err := dbPool.Exec(context.Background(),
-			"INSERT INTO samples (sample_name, sample_description, sample_keywords, sample_owner) VALUES ($1, $2, $3, $4)",
-			name, description, keywords, owner)
+			"INSERT INTO samples (sample_name, sample_description, sample_keywords, sample_prep, sample_owner) VALUES ($1, $2, $3, $4, $5)",
+			name, description, keywords, prep, owner)
 		if err != nil {
 			fmt.Printf("%v", err)
 			http.Error(w, "Error adding sample", http.StatusInternalServerError)
