@@ -166,3 +166,7 @@ cython_debug/
 .DS_Store
 .gitignore
 data
+sampleDB/go.mod
+sampleDB/go.sum
+go.mod
+go.sum

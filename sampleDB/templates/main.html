@@ -1,0 +1,50 @@
+<!-- templates/main.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sample Tracker</title>
+    <style>
+        .tile {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin: 10px;
+            width: 200px;
+            display: inline-block;
+            vertical-align: top;
+        }
+        .tile h2 {
+            font-size: 1.2em;
+            margin: 0 0 10px;
+        }
+        .tile p {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1><a href="/">Sample Tracker</a></h1>
+
+    <!-- New Sample Button -->
+    <a href="/samples/new"><button>Add New Sample</button></a>
+    
+    <!-- Search form -->
+    <form action="/" method="GET">
+        <label for="query">Search by Name or Keywords:</label>
+        <input type="text" id="query" name="query" placeholder="Enter search terms" required>
+        <button type="submit">Search</button>
+    </form>
+
+    <div id="samples">
+        {{range .}}
+        <div class="tile">
+            <h2><a href="/samples/{{.ID}}">{{.Name}}</a></h2>
+            <p><strong>Description:</strong> {{.Description}}</p>
+            <p><strong>Keywords:</strong> {{.Keywords}}</p>
+            <p><strong>Owner:</strong> {{.Owner}}</p>
+        </div>
+        {{end}}
+    </div>
+</body>
+</html>
