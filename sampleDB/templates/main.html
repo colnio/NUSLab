@@ -159,10 +159,16 @@
             </form>
         </div>
         <a href="/samples/new"><button>Add New Sample</button></a>
+        <div class="header-right">
+            <span class="user-info">Logged in as: {{.Username}}</span>
+            <form action="/logout" method="POST" style="display: inline;">
+                <button type="submit" class="logout-button">Logout</button>
+            </form>
+        </div>
     </div>
 
     <div id="samples">
-        {{range .}}
+        {{range .Samples}}
         <div class="tile">
             <h2><a href="/samples/{{.ID}}">{{.Name}}</a></h2>
             <p><strong>Description:</strong> {{.Description}}</p>

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"html/template"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Attachment struct {
@@ -39,6 +41,29 @@ type Sample struct {
 	Attachments []Attachment
 }
 
+type User struct {
+	ID         int
+	Username   string
+	IsApproved bool
+	CreatedAt  time.Time
+}
+
+// Session represents a user session
+type Session struct {
+	Token     string
+	UserID    int
+	Username  string
+	ExpiresAt time.Time
+}
+type MainPageData struct {
+	Samples  []Sample
+	Username string
+	Query    string
+}
+
+// Store sessions in memory (you might want to move this to database for production)
+var sessions = make(map[string]Session)
+
 // Initialize a global database connection pool
 var dbPool *pgxpool.Pool
 
@@ -53,11 +78,15 @@ func main() {
 	defer dbPool.Close()
 
 	// Start server
-	http.HandleFunc("/", mainPageHandler)
-	http.HandleFunc("/samples/new", newSampleHandler)
-	http.HandleFunc("/samples/edit/", editSampleHandler)
-	http.HandleFunc("/samples/", handleSample)
-	http.HandleFunc("/attachment/", handleAttachment)
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/logout", requireAuth(logoutHandler))
+
+	// Protected routes
+	http.HandleFunc("/", requireAuth(mainPageHandler))
+	http.HandleFunc("/samples/new", requireAuth(newSampleHandler))
+	http.HandleFunc("/samples/edit/", requireAuth(editSampleHandler))
+	http.HandleFunc("/samples/", requireAuth(handleSample))
+	http.HandleFunc("/attachment/", requireAuth(handleAttachment))
 
 	fmt.Println("Server started at :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -69,15 +98,16 @@ func mainPageHandler(w http.ResponseWriter, r *http.Request) {
 	var samples []Sample
 	var err error
 
+	// Get user info from context
+	session := r.Context().Value("user").(Session)
+
 	if query != "" {
-		// If there's a search query, fetch matching samples
 		samples, err = searchSamples(query)
 		if err != nil {
 			http.Error(w, "Error retrieving search results", http.StatusInternalServerError)
 			return
 		}
 	} else {
-		// Otherwise, fetch all samples
 		samples, err = getAllSamples()
 		if err != nil {
 			fmt.Printf("%v\n", err)
@@ -86,13 +116,20 @@ func mainPageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Create page data
+	data := MainPageData{
+		Samples:  samples,
+		Username: session.Username,
+		Query:    query,
+	}
+
 	tmpl, err := template.ParseFiles("templates/main.html")
 	if err != nil {
 		http.Error(w, "Error loading template", http.StatusInternalServerError)
 		return
 	}
 
-	tmpl.Execute(w, samples)
+	tmpl.Execute(w, data)
 }
 
 // Update handleSample function to properly handle the upload path pattern
@@ -217,7 +254,7 @@ func searchSamples(query string) ([]Sample, error) {
 // getAllSamples retrieves all samples when there’s no search query
 func getAllSamples() ([]Sample, error) {
 	rows, err := dbPool.Query(context.Background(),
-		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') FROM samples`)
+		`SELECT sample_id, sample_name, sample_description, sample_keywords, sample_owner, coalesce(sample_prep, '') FROM samples order by sample_name asc`)
 	if err != nil {
 		return nil, err
 	}
@@ -625,4 +662,152 @@ func handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// generateSessionToken creates a random session token
+func generateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// middleware to check if user is authenticated
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth for login page and login handler
+		if r.URL.Path == "/login" {
+			next(w, r)
+			return
+		}
+
+		// Check for session cookie
+		cookie, err := r.Cookie("session_token")
+		if err != nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// Validate session
+		session, exists := sessions[cookie.Value]
+		if !exists || time.Now().After(session.ExpiresAt) {
+			if exists {
+				delete(sessions, cookie.Value)
+			}
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// Add user info to request context
+		ctx := context.WithValue(r.Context(), "user", session)
+		next(w, r.WithContext(ctx))
+	}
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// Show login form
+		tmpl, err := template.ParseFiles("templates/login.html")
+		if err != nil {
+			http.Error(w, "Error loading template", http.StatusInternalServerError)
+			return
+		}
+		tmpl.Execute(w, nil)
+		return
+	}
+
+	// Handle login POST
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+
+	// Get user from database
+	var (
+		userID     int
+		passwdHash string
+		isApproved bool
+	)
+	err := dbPool.QueryRow(context.Background(),
+		"SELECT user_id, password_hash, is_approved FROM users WHERE username = $1",
+		username).Scan(&userID, &passwdHash, &isApproved)
+
+	if err != nil || !isApproved {
+		http.Redirect(w, r, "/login?error=invalid", http.StatusSeeOther)
+		return
+	}
+
+	// Check password
+	err = bcrypt.CompareHashAndPassword([]byte(passwdHash), []byte(password))
+	if err != nil {
+		http.Redirect(w, r, "/login?error=invalid", http.StatusSeeOther)
+		return
+	}
+
+	// Create session
+	token, err := generateSessionToken()
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	sessions[token] = Session{
+		Token:     token,
+		UserID:    userID,
+		Username:  username,
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+
+	// Set session cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    token,
+		Path:     "/",
+		Expires:  time.Now().Add(24 * time.Hour),
+		HttpOnly: true,
+		Secure:   true, // Enable in production with HTTPS
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("session_token")
+	if err == nil {
+		delete(sessions, cookie.Value)
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    "",
+		Path:     "/",
+		Expires:  time.Now().Add(-time.Hour),
+		HttpOnly: true,
+	})
+
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// Helper function to create a new user (you'll need to run this manually or create an admin interface)
+func createUser(username, password string) error {
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	// Insert user
+	_, err = dbPool.Exec(context.Background(),
+		"INSERT INTO users (username, password_hash, is_approved) VALUES ($1, $2, false)",
+		username, string(hashedPassword))
+	return err
+}
+
+// Helper function to approve a user (you'll need to run this manually or create an admin interface)
+func approveUser(username string) error {
+	_, err := dbPool.Exec(context.Background(),
+		"UPDATE users SET is_approved = true WHERE username = $1",
+		username)
+	return err
 }
