@@ -20,6 +20,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+type AuthPageData struct {
+	Error      string
+	Success    string
+	IsRegister bool
+}
 type Attachment struct {
 	ID           int
 	SampleID     int
@@ -70,7 +75,7 @@ var dbPool *pgxpool.Pool
 func main() {
 	// Connect to PostgreSQL
 	var err error
-	dbURL := "postgres://app:app@localhost:5432/sampledb" // replace with your credentials
+	dbURL := "postgres://app:app@container-pg:5432/sampledb" // replace with your credentials
 	dbPool, err = pgxpool.New(context.Background(), dbURL)
 	if err != nil {
 		log.Fatalf("Unable to connect to database: %v\n", err)
@@ -79,6 +84,7 @@ func main() {
 
 	// Start server
 	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/register", registerHandler) // Add this line
 	http.HandleFunc("/logout", requireAuth(logoutHandler))
 
 	// Protected routes
@@ -88,8 +94,8 @@ func main() {
 	http.HandleFunc("/samples/", requireAuth(handleSample))
 	http.HandleFunc("/attachment/", requireAuth(handleAttachment))
 
-	fmt.Println("Server started at :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	fmt.Println("Server started at :8010")
+	log.Fatal(http.ListenAndServe(":8010", nil))
 }
 
 // mainPageHandler serves the main page and handles search functionality
@@ -705,16 +711,21 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r.WithContext(ctx))
 	}
 }
-
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		data := AuthPageData{
+			Error:      r.URL.Query().Get("error"),
+			Success:    r.URL.Query().Get("success"),
+			IsRegister: false,
+		}
+
 		// Show login form
 		tmpl, err := template.ParseFiles("templates/login.html")
 		if err != nil {
 			http.Error(w, "Error loading template", http.StatusInternalServerError)
 			return
 		}
-		tmpl.Execute(w, nil)
+		tmpl.Execute(w, data)
 		return
 	}
 
@@ -732,15 +743,21 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		"SELECT user_id, password_hash, is_approved FROM users WHERE username = $1",
 		username).Scan(&userID, &passwdHash, &isApproved)
 
-	if err != nil || !isApproved {
-		http.Redirect(w, r, "/login?error=invalid", http.StatusSeeOther)
+	if err != nil {
+		http.Redirect(w, r, "/login?error=Invalid+username+or+password", http.StatusSeeOther)
+		return
+	}
+
+	// Check if user is approved
+	if !isApproved {
+		http.Redirect(w, r, "/login?error=Your+account+is+pending+approval", http.StatusSeeOther)
 		return
 	}
 
 	// Check password
 	err = bcrypt.CompareHashAndPassword([]byte(passwdHash), []byte(password))
 	if err != nil {
-		http.Redirect(w, r, "/login?error=invalid", http.StatusSeeOther)
+		http.Redirect(w, r, "/login?error=Invalid+username+or+password", http.StatusSeeOther)
 		return
 	}
 
@@ -772,6 +789,75 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func registerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		data := AuthPageData{
+			Error:      r.URL.Query().Get("error"),
+			IsRegister: true,
+		}
+
+		// Show registration form
+		tmpl, err := template.ParseFiles("templates/login.html")
+		if err != nil {
+			http.Error(w, "Error loading template", http.StatusInternalServerError)
+			return
+		}
+		tmpl.Execute(w, data)
+		return
+	}
+
+	// Handle register POST
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+	confirmPassword := r.FormValue("confirm_password")
+
+	// Validate input
+	if username == "" || password == "" {
+		http.Redirect(w, r, "/register?error=Username+and+password+are+required", http.StatusSeeOther)
+		return
+	}
+
+	if password != confirmPassword {
+		http.Redirect(w, r, "/register?error=Passwords+do+not+match", http.StatusSeeOther)
+		return
+	}
+
+	// Check if username already exists
+	var exists bool
+	err := dbPool.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)",
+		username).Scan(&exists)
+
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	if exists {
+		http.Redirect(w, r, "/register?error=Username+already+taken", http.StatusSeeOther)
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Insert new user
+	_, err = dbPool.Exec(context.Background(),
+		"INSERT INTO users (username, password_hash, is_approved) VALUES ($1, $2, false)",
+		username, string(hashedPassword))
+
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect to login page with success message
+	http.Redirect(w, r, "/login?success=Registration+successful.+Please+wait+for+admin+approval", http.StatusSeeOther)
+}
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
