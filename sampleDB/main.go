@@ -95,7 +95,7 @@ func main() {
 	http.HandleFunc("/attachment/", requireAuth(handleAttachment))
 
 	fmt.Println("Server started at :8010")
-	log.Fatal(http.ListenAndServe(":8010", nil))
+	log.Fatal(http.ListenAndServe(":80", nil))
 }
 
 // mainPageHandler serves the main page and handles search functionality
@@ -782,7 +782,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  time.Now().Add(24 * time.Hour),
 		HttpOnly: true,
-		Secure:   true, // Enable in production with HTTPS
+		Secure:   false, // Enable in production with HTTPS
 		SameSite: http.SameSiteStrictMode,
 	})
 
