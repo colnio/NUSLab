@@ -195,6 +195,8 @@ class VACRegime(QWidget):
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             self.device.set_current_range(self.current_range)
+        if type(self.device) == keithley.Keithley6430:
+            self.device.device.write(f":SENS:CURR:PROT {self.current_range_input.currentText()};")
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
         # Clear plots

@@ -161,14 +161,14 @@ class Keithley6430:
         self.device.write('*CLS;')
         self.device.write('*RST;')
         self.device.write(":SENS:FUNC 'CURR';")
-        self.device.write(f":SENS:CURR:NPLC {nplc}")
-        self.device.write(f":SOUR:VOLT:MODE FIX")
+        self.device.write(f":SENS:CURR:NPLC {nplc};")
+        self.device.write(f":SOUR:VOLT:MODE FIX;")
         self.device.write(f":SENS:CURR:PROT 105e-3;")
         self.output_enabled = False
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
-        self.device.write('*CLS')
+        self.device.write('*CLS;')
 
     def set_voltage_range(self, range_value):
         """
@@ -198,7 +198,7 @@ class Keithley6430:
         """
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
         if not self.output_enabled:
-            self.device.write('OUTP ON')  # Turn the output on
+            self.device.write('OUTP ON;')  # Turn the output on
             self.output_enabled = True
 
     def disable_output(self):
@@ -207,7 +207,7 @@ class Keithley6430:
         :param voltage_value: Voltage to set (in volts).
         """
         self.output_enabled = False
-        self.device.write('OUTP OFF')  # Turn the output on
+        self.device.write('OUTP OFF;')  # Turn the output on
 
     def read_current(self, autorange=False):
         """
@@ -238,7 +238,7 @@ class Keithley6430:
     def close(self):
         """Close the GPIB connection."""
         self.set_voltage(0)
-        self.device.write('OUTP OFF')  # Turn the output off
+        self.device.write('OUTP OFF;')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6517B closed.")
 
