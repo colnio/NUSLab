@@ -177,7 +177,7 @@ class FETRegime(QWidget):
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
 
-        # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
+        # Plot area for I(V), abs(I(V)) 
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('w')
 
@@ -187,9 +187,18 @@ class FETRegime(QWidget):
         self.iv_plot.showGrid(x=True, y=True)
         self.leakage_plot = self.plot_widget.addPlot(title="Gate (Leakage) I(V)")
         self.leakage_plot.showGrid(x=True, y=True)
-        
+
         layout.addWidget(self.plot_widget)
 
+        # Plot area for I(t)
+        self.time_plot_widget = pg.GraphicsLayoutWidget()
+        self.time_plot_widget.setBackground('w')  
+        self.time_plot_widget = pg.GraphicsLayoutWidget()
+        self.time_plot_widget.setBackground('w')
+        pg.setConfigOption('background', 'w')
+        self.i_plot = self.time_plot_widget.addPlot(title="I(T)")
+        self.i_plot.showGrid(x=True, y=True)
+        layout.addWidget(self.time_plot_widget)
         self.setLayout(layout)
 
     def start_measurement(self):
@@ -294,7 +303,7 @@ class FETRegime(QWidget):
             QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current, leakage, self.direction))
+        self.measurements.append((self.current_voltage, average_current, leakage, self.direction, time.time()))
         self.noise_data.append(noise_currents)
 
         # Update plots
@@ -327,7 +336,7 @@ class FETRegime(QWidget):
         voltages = np.array([m[0] for m in self.measurements])
         currents = np.array([m[1] for m in self.measurements])
         currents_leak = np.array([m[2] for m in self.measurements])
-        
+        times = np.array([m[4] for m in self.measurements])
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
@@ -342,6 +351,13 @@ class FETRegime(QWidget):
         self.leakage_plot.setLabel('left', 'Current (A)')
         self.leakage_plot.setLabel('bottom', 'Gate Voltage (V)')
 
+
+
+        self.i_plot.plot(times - times[0], currents, pen=pg.mkPen(color='r', width=2), clear=True)
+        self.i_plot.plot(times - times[0], currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
+        self.i_plot.setLabel('left', 'Current (A)')
+        self.i_plot.setLabel('bottom', 'Time (s)')
+
     def export_to_csv(self):
 
         sample_dir = op.join(self.folder, self.date, self.sample_name)
@@ -355,7 +371,7 @@ class FETRegime(QWidget):
 
 
     def get_pandas_data(self):
-        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Leakage', 'Direction'])
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Leakage', 'Direction', 'Timestamp'])
         return df
 
     def make_plot(self):
