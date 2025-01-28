@@ -2,6 +2,7 @@ import pyvisa
 import time
 import numpy as np
 from pyvisa import ResourceManager
+import mock
 
 def find_range(current):
     ranges = 2 * 10.0**np.arange(-12.0, -1.0, 1.0)
@@ -166,6 +167,19 @@ class Keithley6430:
         self.device.write(f":SENS:CURR:PROT 105e-3;")
         self.output_enabled = False
 
+    def set_source_mode(self, mode):
+        """Set source mode to either 'voltage' or 'current'"""
+        if mode.lower() not in ['voltage', 'current']:
+            raise ValueError("Mode must be either 'voltage' or 'current'")
+        
+        self.source_mode = mode.lower()
+        if self.source_mode == 'voltage':
+            self.device.write(":SENS:FUNC 'CURR';")
+            self.device.write(":SOUR:FUNC VOLT")
+        else:
+            self.device.write(":SENS:FUNC 'VOLT';")
+            self.device.write(":SOUR:FUNC CURR")
+
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
         self.device.write('*CLS;')
@@ -201,6 +215,15 @@ class Keithley6430:
             self.device.write('OUTP ON;')  # Turn the output on
             self.output_enabled = True
 
+    def set_current(self, current_value):
+        if self.source_mode != 'current':
+            raise ValueError("Device is not in current source mode")
+        self.device.write(f'SOUR:CURR:LEV {current_value};')
+        if not self.output_enabled:
+            self.device.write('OUTP ON;')
+            self.output_enabled = True
+            # time.sleep(1)
+
     def disable_output(self):
         """
         Set the output voltage.
@@ -233,7 +256,6 @@ class Keithley6430:
                 time.sleep(delay)
         except KeyboardInterrupt:
             print("Continuous current reading stopped.")
-    
 
     def close(self):
         """Close the GPIB connection."""
@@ -241,6 +263,16 @@ class Keithley6430:
         self.device.write('OUTP OFF;')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6517B closed.")
+    
+    def read_voltage(self, autorange=False):
+        if self.source_mode != 'current':
+            raise ValueError("Device is not in current source mode")
+        if autorange:
+            self.device.write(':MEAS:VOLT?;')
+        else:
+            self.device.write(':READ?;')
+        voltage_value = self.device.read().split(',')[0][:-4:]
+        return float(voltage_value)
 
 
 class Keithley6517B_Mock:
@@ -258,10 +290,24 @@ class Keithley6517B_Mock:
         print(f"Mock Keithley 6517B initialized at address {gpib_address} with NPLC={nplc}")
         self.clear_buffer()
         self.init_device(nplc)
+        self.device = mock.Mock()
 
     def init_device(self, nplc):
         print(f"Initializing mock device with NPLC={nplc}")
         self.output_enabled = False
+
+    def set_source_mode(self, mode):
+        """Set source mode to either 'voltage' or 'current'"""
+        if mode.lower() not in ['voltage', 'current']:
+            raise ValueError("Mode must be either 'voltage' or 'current'")
+        
+        self.source_mode = mode.lower()
+        if self.source_mode == 'voltage':
+            self.device.write(":SENS:FUNC 'CURR';")
+            self.device.write(":SOUR:FUNC VOLT")
+        else:
+            self.device.write(":SENS:FUNC 'VOLT';")
+            self.device.write(":SOUR:FUNC CURR")
 
     def clear_buffer(self):
         """Clears the mock instrument's input buffer."""
@@ -291,6 +337,15 @@ class Keithley6517B_Mock:
         self.voltage_level = voltage_value
         self.output_enabled = True
         print(f"Mock voltage set to {voltage_value} V and output enabled")
+
+    def set_current(self, current_value):
+        if self.source_mode != 'current':
+            raise ValueError("Device is not in current source mode")
+        self.device.write(f'SOUR:CURR:LEV {current_value};')
+        if not self.output_enabled:
+            self.device.write('OUTP ON')
+            self.output_enabled = True
+            # time.sleep(1)
 
     def disable_output(self):
         """
@@ -338,3 +393,15 @@ class Keithley6517B_Mock:
         self.set_voltage(0)
         self.output_enabled = False
         print("Mock connection to Keithley 6517B closed.")
+    
+    def read_voltage(self, autorange=False):
+        if self.source_mode != 'current':
+            raise ValueError("Device is not in current source mode")
+        # if autorange:
+        #     self.device.write(':MEAS:VOLT?;')
+        # else:
+        #     self.device.write(':READ?;')
+        voltage_value = 1 + 0.1 * (2 * (np.random.random() - 0.5))
+        return float(voltage_value)
+    
+    
