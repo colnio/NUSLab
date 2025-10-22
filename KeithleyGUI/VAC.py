@@ -3,15 +3,19 @@ import matplotlib
 import matplotlib.pyplot
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox,
+    QLineEdit, QMessageBox, QCheckBox
+)
 from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
 import pandas as pd
-import time 
+import time
 import datetime
 import matplotlib.pyplot as plt
 import os.path as op
-import os 
+import os
 import gc
 matplotlib.use('Agg')
 
@@ -33,9 +37,15 @@ class VACRegime(QWidget):
         self.noise_data = []  # For storing I(t) during measurements
         self.n_runs = 2
         self.current_range = 1e-8
+        self.direction = 1
+        self.active_compliance = 1
+        # Polarity-aware compliance switching helpers
+        self._last_comp_polarity = None  # 'neg' or 'pos'
+        self.prev_voltage = 0.0
+        self.compliance_relaxed_factor = 10.0  # compliance multiplier when a side is unchecked
+
         # Setup GUI components
         self.initUI()
-        self.direction = 1
 
         # Setup timer for measurements
         self.timer = QTimer()
@@ -48,26 +58,27 @@ class VACRegime(QWidget):
         self.folder = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
-        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
+        self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
     def initUI(self):
-        
         self.setWindowTitle('Keithley 6517B IV')
         layout = QVBoxLayout()
 
-        # keithley 
+        # keithley
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
         self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
         layout.addLayout(device_address_layout)
+
         # sample name
         sample_name_layout = QHBoxLayout()
         self.sample_name_input = QLineEdit()
         sample_name_layout.addWidget(QLabel('Sample name:'))
         sample_name_layout.addWidget(self.sample_name_input)
         layout.addLayout(sample_name_layout)
+
         # Current range input
         current_range_layout = QHBoxLayout()
         self.current_range_input = QComboBox()
@@ -75,6 +86,7 @@ class VACRegime(QWidget):
         current_range_layout.addWidget(QLabel('Current range (A):'))
         current_range_layout.addWidget(self.current_range_input)
         layout.addLayout(current_range_layout)
+
         # NPLC input
         nplc_layout = QHBoxLayout()
         self.nplc_input = QComboBox()
@@ -82,6 +94,7 @@ class VACRegime(QWidget):
         nplc_layout.addWidget(QLabel('NPLC (1 = 20 ms):'))
         nplc_layout.addWidget(self.nplc_input)
         layout.addLayout(nplc_layout)
+
         # Voltage range input
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
@@ -133,6 +146,16 @@ class VACRegime(QWidget):
         collection_time_layout.addWidget(self.collection_time_input)
         layout.addLayout(collection_time_layout)
 
+        # Polarity-specific compliance checkboxes
+        comp_sel_layout = QHBoxLayout()
+        self.chk_comp_neg = QCheckBox('Set compliance at V < 0')
+        self.chk_comp_neg.setChecked(True)
+        self.chk_comp_pos = QCheckBox('Set compliance at V > 0')
+        self.chk_comp_pos.setChecked(True)
+        comp_sel_layout.addWidget(self.chk_comp_neg)
+        comp_sel_layout.addWidget(self.chk_comp_pos)
+        layout.addLayout(comp_sel_layout)
+
         # Start/Stop button
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
@@ -144,7 +167,6 @@ class VACRegime(QWidget):
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
-        # button_layout.addWidget(QLabel('Voltage now: '))
         button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
@@ -166,13 +188,47 @@ class VACRegime(QWidget):
         layout.addWidget(self.plot_widget)
         self.setLayout(layout)
 
+    # ===================== Helper: set compliance per polarity =====================
+    def _apply_compliance_for_voltage(self, voltage):
+        """
+        Apply instrument compliance for the current voltage side.
+        Only applies to non-6517B devices (e.g., 6430).
+        If a side is unchecked, we set a 'relaxed' (higher) compliance.
+        """
+        # Only switch for devices that support explicit compliance setting in your code
+        if not isinstance(self.device, keithley.Keithley6430):
+            return
+
+        try:
+            user_comp = float(self.compliance_current)
+        except Exception:
+            return
+
+        want_neg = self.chk_comp_neg.isChecked()
+        want_pos = self.chk_comp_pos.isChecked()
+        print(want_neg, want_pos)
+        side = 'neg' if voltage < 0 else 'pos'
+        if (side == 'neg' and want_neg) or (side == 'pos' and want_pos):
+            comp_to_set = user_comp
+        else:
+            comp_to_set = 105e-3  # relaxed on unchecked side
+
+        # Set the compliance on the instrument (method name as in your code)
+        try:
+            print(f'setting compliance to {comp_to_set}')
+            self.device.set_complicance_current(comp_to_set)
+        except Exception as e:
+            print(f"[warn] set_complicance_current failed: {e}")
+        return comp_to_set
+
+    # ===================== Measurement lifecycle =====================
     def start_measurement(self):
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
         try:
             self.compliance_current = float(eval(self.compliance_input.text()))
-        except:
+        except Exception:
             QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
             return
         self.nplc = self.nplc_input.currentText()
@@ -188,8 +244,9 @@ class VACRegime(QWidget):
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
+        self.prev_voltage = 0.1
         self.device.set_voltage(self.current_voltage)
-        time.sleep(5)
+        # time.sleep(5)
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if self.device == None:
             QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
@@ -199,17 +256,16 @@ class VACRegime(QWidget):
         if self.current_range != 'Auto-range':
             self.device.set_current_range(eval(self.current_range))
         if type(self.device) == keithley.Keithley6430:
-            self.device.device.write(f":SENS:CURR:PROT {self.compliance_input.text()};")
-            pass
+            # Ensure a valid baseline compliance is set according to side/checkboxes
+            self._apply_compliance_for_voltage(self.current_voltage)  # at 0 V treat as 'pos'
+
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
         # Clear plots
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
-        
 
     def stop_measurement(self):
-        self.current_voltage
         self.device.set_voltage(0)
         self.voltage_now.setText('0 V')
         self.voltage_now.adjustSize()
@@ -229,13 +285,23 @@ class VACRegime(QWidget):
         self.device.set_voltage(self.current_voltage)
         self.voltage_now.setText('{:.2f} V, n = {}'.format(self.current_voltage, self.n_runs))
         self.voltage_now.adjustSize()
+
+        # Switch compliance ONLY when crossing 0 V (non-6517B)
+        # if not isinstance(self.device, keithley.Keithley6517B):
+        # print(self.current_voltage, self.prev_voltage)
+        crossed = (np.sign(self.current_voltage) != np.sign(self.prev_voltage))
+        # print(crossed)
+        if crossed and not (type(self.device) == keithley.Keithley6517B):
+            self.active_compliance = self._apply_compliance_for_voltage(self.current_voltage)
+
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
-            if p1 == 0: 
+            if p1 == 0:
                 p1 = None
         if self.current_range == 'Auto-range':
-            current = keithley.auto_range(self.device, p1=p1, compl=(1 if type(self.device) == keithley.Keithley6517B else self.compliance_current))
+            # current = keithley.auto_range(self.device, p1=p1, compl=(1 if type(self.device) == keithley.Keithley6517B else self.compliance_current))
+            current = keithley.auto_range(self.device, p1=p1, compl=self.active_compliance)
         total_current += self.device.read_current()
         num_measurements += 1
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
@@ -249,16 +315,16 @@ class VACRegime(QWidget):
             average_current = total_current / num_measurements
         else:
             average_current = 0
-        # Check compliance current
+        # Check compliance current (kept as-is; switching handled separately)
         if abs(average_current) >= self.compliance_current:
-            #self.stop_measurement()
-            #QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
             pass
         # Store the data (voltage, average current)
         self.measurements.append((self.current_voltage, average_current, self.direction, time.time()))
         self.noise_data.append(noise_currents)
         # Update plots
         self.update_plots()
+        # Track previous voltage for sign-cross detection
+        self.prev_voltage = np.sign(self.current_voltage)
         # Move to the next voltage step
         self.current_voltage += self.voltage_step * self.direction
 
@@ -277,6 +343,8 @@ class VACRegime(QWidget):
             self.device.set_voltage(0)
             self.stop_measurement()
 
+
+
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
         voltages = [m[0] for m in self.measurements]
@@ -286,19 +354,20 @@ class VACRegime(QWidget):
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
-        self.iv_plot.plot([voltages[-1]], [currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
+        if voltages:
+            self.iv_plot.plot([voltages[-1]], [currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
         self.iv_plot.setLabel('left', 'Current (A)')
         self.iv_plot.setLabel('bottom', 'Voltage (V)')
 
         # Update |I(V)| plot
         self.abs_iv_plot.plot(voltages, abs_currents, pen=pg.mkPen(color='r', width=2), clear=True)
         self.abs_iv_plot.plot(voltages, abs_currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.abs_iv_plot.plot([voltages[-1]], [abs_currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
+        if voltages:
+            self.abs_iv_plot.plot([voltages[-1]], [abs_currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
         self.abs_iv_plot.setLabel('left', '|Current| (A)')
         self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
     def export_to_csv(self):
-
         sample_dir = op.join(self.folder, self.date, self.sample_name)
         if not op.exists(sample_dir):
             os.makedirs(sample_dir)
@@ -308,7 +377,6 @@ class VACRegime(QWidget):
         df = self.get_pandas_data()
         df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
         del df
-
 
     def get_pandas_data(self):
         df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction', 'Timestamp'])
@@ -354,7 +422,7 @@ class VACRegime(QWidget):
         plt.close('all')
         gc.collect()
         # matplotlib.pyplot.clf()
-    
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

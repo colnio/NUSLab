@@ -158,6 +158,8 @@ class Keithley6517B:
 class Keithley6430:
     def __init__(self, gpib_address='GPIB0::16::INSTR', nplc=1):
         self.rm = pyvisa.ResourceManager()
+        self.gpib_address=gpib_address
+        self.nplc=nplc
         self.device = self.rm.open_resource(f'{gpib_address}')
         self.device.timeout = 5000  # Timeout for commands, can be adjusted if needed
         self.output_enabled = False
@@ -168,11 +170,18 @@ class Keithley6430:
         self.device.write('*CLS;')
         self.device.write('*RST;')
         self.device.write(":SENS:FUNC 'CURR';")
-        self.device.write(f":SENS:CURR:NPLC {nplc}")
-        self.device.write(f":SOUR:VOLT:MODE FIX")
-        self.device.write(f":SENS:CURR:PROT 105e-3;")
+        self.device.write(f":SENS:CURR:NPLC {nplc};")
+        self.device.write(f":SOUR:VOLT:MODE FIX;")
+        # self.device.write(f":SENS:CURR:PROT 105e-3;")
         self.output_enabled = False
-
+    def set_complicance_current(self, curr):
+        # self.__init__(self.gpib_address, self.nplc)
+        self.device.write(f"*RST;")
+        # self.device.write(f":SENS:CURR:PROT:STAT ON")
+        self.device.write(f':SENS:CURR:RANG:AUTO ON;')
+        self.device.write(f":SENS:CURR:PROT {curr}")
+        self.device.write(f':SENS:CURR:RANG {curr};')
+        self.read_current(autorange=True)
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
         self.device.write('*CLS')
@@ -191,7 +200,7 @@ class Keithley6430:
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
         if range_value > 105e-3:
-            return
+            range_value = 105e-3
         self.device.write(f'CURR:RANG {range_value};')
     
     def get_current_range(self):
