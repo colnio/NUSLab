@@ -687,7 +687,7 @@ class Keithley2700:
             self.device.write("CURR:RANG:AUTO ON")
         self.device.write("MEAS:CURR?")
         # 2700 “MEAS?” returns a single fresh reading; parse first token
-        return float(self.device.read().split(',')[0])
+        return float(self.device.read().split(',')[0][:-3])
 
     def read_voltage(self, ac=False, autorange=False):
         if autorange:
@@ -697,7 +697,7 @@ class Keithley2700:
                 self.device.write("VOLT:RANG:AUTO ON")
         cmd = "MEAS:VOLT:AC?" if ac else "MEAS:VOLT?"
         self.device.write(cmd)
-        return float(self.device.read().split(',')[0])
+        return float(self.device.read().split(',')[0][:-3])
 
     def read_resistance(self, four_wire=False, autorange=False):
         if autorange:
