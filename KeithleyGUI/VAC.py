@@ -291,7 +291,7 @@ class VACRegime(QWidget):
         # print(self.current_voltage, self.prev_voltage)
         crossed = (np.sign(self.current_voltage) != np.sign(self.prev_voltage))
         # print(crossed)
-        if crossed and not (type(self.device) == keithley.Keithley6517B):
+        if crossed and not (type(self.device) == keithley.Keithley6517B) and not (type(self.device) == keithley.Keithley6517B_Mock):
             self.active_compliance = self._apply_compliance_for_voltage(self.current_voltage)
 
         p1 = None
