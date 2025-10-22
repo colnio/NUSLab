@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
-from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
+from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
 import pandas as pd
 import time 
@@ -28,7 +28,7 @@ def derivative(arr, step):
         outp[i] = out / step
     return outp
 
-class FETRegime(QWidget):
+class IVgRegime(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -66,7 +66,7 @@ class FETRegime(QWidget):
 
     def initUI(self):
         
-        self.setWindowTitle('Keithley FET')
+        self.setWindowTitle('Keithley IVg')
         layout = QVBoxLayout()
 
         # keithley 
@@ -107,14 +107,14 @@ class FETRegime(QWidget):
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
         self.voltage_min_input.setRange(-100, 100)
-        self.voltage_min_input.setDecimals(2)
         self.voltage_min_input.setValue(-1)
         self.voltage_max_input = QDoubleSpinBox()
         self.voltage_max_input.setRange(-100, 100)
-        self.voltage_max_input.setDecimals(2)
         self.voltage_max_input.setValue(1)
         self.voltage_sd_input = QDoubleSpinBox()
-        self.voltage_sd_input.setRange(-10, 10)
+        self.voltage_sd_input.setRange(-100, 100)
+        self.voltage_min_input.setDecimals(4)
+        self.voltage_max_input.setDecimals(4)
         self.voltage_sd_input.setDecimals(4)
         self.voltage_sd_input.setValue(0.01)
         voltage_range_layout.addWidget(QLabel('Gate Voltage min (V):'))
@@ -166,18 +166,11 @@ class FETRegime(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.clicked.connect(self.stop_measurement)
-        self.voltage_now = QLabel('0 V')
-        self.voltage_now.setAlignment(Qt.AlignCenter)
-        self.voltage_now.setStyleSheet("background-color: lightgray") 
-        self.stop_button = QPushButton('Stop Measurement')
-        self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
-        # button_layout.addWidget(QLabel('Voltage now: '))
-        button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
 
-        # Plot area for I(V), abs(I(V)) 
+        # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('w')
 
@@ -187,18 +180,9 @@ class FETRegime(QWidget):
         self.iv_plot.showGrid(x=True, y=True)
         self.leakage_plot = self.plot_widget.addPlot(title="Gate (Leakage) I(V)")
         self.leakage_plot.showGrid(x=True, y=True)
-
+        
         layout.addWidget(self.plot_widget)
 
-        # Plot area for I(t)
-        self.time_plot_widget = pg.GraphicsLayoutWidget()
-        self.time_plot_widget.setBackground('w')  
-        self.time_plot_widget = pg.GraphicsLayoutWidget()
-        self.time_plot_widget.setBackground('w')
-        pg.setConfigOption('background', 'w')
-        self.i_plot = self.time_plot_widget.addPlot(title="I(T)")
-        self.i_plot.showGrid(x=True, y=True)
-        layout.addWidget(self.time_plot_widget)
         self.setLayout(layout)
 
     def start_measurement(self):
@@ -255,7 +239,6 @@ class FETRegime(QWidget):
         self.device_gate.set_voltage(0)
         self.device_gate.disable_output()
         self.device_sd.set_voltage(0)
-        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
         self.device_sd.disable_output()
         self.timer.stop()
         self.make_plot()
@@ -270,7 +253,6 @@ class FETRegime(QWidget):
         noise_currents = []  # Store the current noise
 
         self.device_gate.set_voltage(self.current_voltage)
-        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
@@ -303,7 +285,7 @@ class FETRegime(QWidget):
             QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
 
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current, leakage, self.direction, time.time()))
+        self.measurements.append((self.current_voltage, average_current, leakage, self.direction))
         self.noise_data.append(noise_currents)
 
         # Update plots
@@ -336,7 +318,7 @@ class FETRegime(QWidget):
         voltages = np.array([m[0] for m in self.measurements])
         currents = np.array([m[1] for m in self.measurements])
         currents_leak = np.array([m[2] for m in self.measurements])
-        times = np.array([m[4] for m in self.measurements])
+        
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
@@ -351,13 +333,6 @@ class FETRegime(QWidget):
         self.leakage_plot.setLabel('left', 'Current (A)')
         self.leakage_plot.setLabel('bottom', 'Gate Voltage (V)')
 
-
-
-        self.i_plot.plot(times - times[0], currents, pen=pg.mkPen(color='r', width=2), clear=True)
-        self.i_plot.plot(times - times[0], currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.i_plot.setLabel('left', 'Current (A)')
-        self.i_plot.setLabel('bottom', 'Time (s)')
-
     def export_to_csv(self):
 
         sample_dir = op.join(self.folder, self.date, self.sample_name)
@@ -371,7 +346,7 @@ class FETRegime(QWidget):
 
 
     def get_pandas_data(self):
-        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Leakage', 'Direction', 'Timestamp'])
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Leakage', 'Direction'])
         return df
 
     def make_plot(self):
@@ -412,6 +387,6 @@ class FETRegime(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = FETRegime()
+    window = IVgRegime()
     window.show()
     sys.exit(app.exec_())

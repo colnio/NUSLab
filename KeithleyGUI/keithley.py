@@ -2,7 +2,6 @@ import pyvisa
 import time
 import numpy as np
 from pyvisa import ResourceManager
-import mock
 
 def find_range(current):
     ranges = 2 * 10.0**np.arange(-12.0, -1.0, 1.0)
@@ -11,14 +10,20 @@ def find_range(current):
         return ranges[min(idx)]
     return max(ranges)
 
-def auto_range(device, p1=None):
+def auto_range(device, p1=None, compl=1):
     if p1 is None:
         c = device.read_current(autorange=True)
-        device.set_current_range(find_range(abs(c) * 3))
+        if find_range(abs(c) * 3) >= compl*0.9:
+            pass
+        else:
+            device.set_current_range(find_range(abs(c) * 3))
     else:
-        device.set_current_range(find_range(abs(p1) * 3))
+        if find_range(abs(p1) * 3) >= compl*0.9:
+            pass
+        else:
+            device.set_current_range(find_range(abs(p1) * 3))
         c = device.read_current()
-    return c if abs(c) < 20e-3 else device.read_current(autorange=True)
+    return c if abs(c) < 200e-3 else device.read_current(autorange=True)
 
 def get_device(gpib_address, nplc):
     device = None
@@ -28,7 +33,7 @@ def get_device(gpib_address, nplc):
         try:
             if '6517B' in gpib_address:
                 device = Keithley6517B(gpib_address.split(' ')[0], nplc=nplc)
-            if '6430' in gpib_address:
+            if '6430' in gpib_address or '2400' in gpib_address:
                 device = Keithley6430(gpib_address.split(' ')[0], nplc=nplc)
         except:
             pass
@@ -53,6 +58,7 @@ def get_devices_list():
             id = 'Unkown'
         if 'keithley' in id.lower():
             l.append([r, id.split(',')[1]])
+        print(id)
     return l
     
 
@@ -162,27 +168,14 @@ class Keithley6430:
         self.device.write('*CLS;')
         self.device.write('*RST;')
         self.device.write(":SENS:FUNC 'CURR';")
-        self.device.write(f":SENS:CURR:NPLC {nplc};")
-        self.device.write(f":SOUR:VOLT:MODE FIX;")
+        self.device.write(f":SENS:CURR:NPLC {nplc}")
+        self.device.write(f":SOUR:VOLT:MODE FIX")
         self.device.write(f":SENS:CURR:PROT 105e-3;")
         self.output_enabled = False
 
-    def set_source_mode(self, mode):
-        """Set source mode to either 'voltage' or 'current'"""
-        if mode.lower() not in ['voltage', 'current']:
-            raise ValueError("Mode must be either 'voltage' or 'current'")
-        
-        self.source_mode = mode.lower()
-        if self.source_mode == 'voltage':
-            self.device.write(":SENS:FUNC 'CURR';")
-            self.device.write(":SOUR:FUNC VOLT")
-        else:
-            self.device.write(":SENS:FUNC 'VOLT';")
-            self.device.write(":SOUR:FUNC CURR")
-
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
-        self.device.write('*CLS;')
+        self.device.write('*CLS')
 
     def set_voltage_range(self, range_value):
         """
@@ -212,17 +205,8 @@ class Keithley6430:
         """
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
         if not self.output_enabled:
-            self.device.write('OUTP ON;')  # Turn the output on
+            self.device.write('OUTP ON')  # Turn the output on
             self.output_enabled = True
-
-    def set_current(self, current_value):
-        if self.source_mode != 'current':
-            raise ValueError("Device is not in current source mode")
-        self.device.write(f'SOUR:CURR:LEV {current_value};')
-        if not self.output_enabled:
-            self.device.write('OUTP ON;')
-            self.output_enabled = True
-            # time.sleep(1)
 
     def disable_output(self):
         """
@@ -230,7 +214,7 @@ class Keithley6430:
         :param voltage_value: Voltage to set (in volts).
         """
         self.output_enabled = False
-        self.device.write('OUTP OFF;')  # Turn the output on
+        self.device.write('OUTP OFF')  # Turn the output on
 
     def read_current(self, autorange=False):
         """
@@ -256,23 +240,14 @@ class Keithley6430:
                 time.sleep(delay)
         except KeyboardInterrupt:
             print("Continuous current reading stopped.")
+    
 
     def close(self):
         """Close the GPIB connection."""
         self.set_voltage(0)
-        self.device.write('OUTP OFF;')  # Turn the output off
+        self.device.write('OUTP OFF')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6517B closed.")
-    
-    def read_voltage(self, autorange=False):
-        if self.source_mode != 'current':
-            raise ValueError("Device is not in current source mode")
-        if autorange:
-            self.device.write(':MEAS:VOLT?;')
-        else:
-            self.device.write(':READ?;')
-        voltage_value = self.device.read().split(',')[0][:-4:]
-        return float(voltage_value)
 
 
 class Keithley6517B_Mock:
@@ -290,24 +265,10 @@ class Keithley6517B_Mock:
         print(f"Mock Keithley 6517B initialized at address {gpib_address} with NPLC={nplc}")
         self.clear_buffer()
         self.init_device(nplc)
-        self.device = mock.Mock()
 
     def init_device(self, nplc):
         print(f"Initializing mock device with NPLC={nplc}")
         self.output_enabled = False
-
-    def set_source_mode(self, mode):
-        """Set source mode to either 'voltage' or 'current'"""
-        if mode.lower() not in ['voltage', 'current']:
-            raise ValueError("Mode must be either 'voltage' or 'current'")
-        
-        self.source_mode = mode.lower()
-        if self.source_mode == 'voltage':
-            self.device.write(":SENS:FUNC 'CURR';")
-            self.device.write(":SOUR:FUNC VOLT")
-        else:
-            self.device.write(":SENS:FUNC 'VOLT';")
-            self.device.write(":SOUR:FUNC CURR")
 
     def clear_buffer(self):
         """Clears the mock instrument's input buffer."""
@@ -337,15 +298,6 @@ class Keithley6517B_Mock:
         self.voltage_level = voltage_value
         self.output_enabled = True
         print(f"Mock voltage set to {voltage_value} V and output enabled")
-
-    def set_current(self, current_value):
-        if self.source_mode != 'current':
-            raise ValueError("Device is not in current source mode")
-        self.device.write(f'SOUR:CURR:LEV {current_value};')
-        if not self.output_enabled:
-            self.device.write('OUTP ON')
-            self.output_enabled = True
-            # time.sleep(1)
 
     def disable_output(self):
         """
@@ -393,15 +345,3 @@ class Keithley6517B_Mock:
         self.set_voltage(0)
         self.output_enabled = False
         print("Mock connection to Keithley 6517B closed.")
-    
-    def read_voltage(self, autorange=False):
-        if self.source_mode != 'current':
-            raise ValueError("Device is not in current source mode")
-        # if autorange:
-        #     self.device.write(':MEAS:VOLT?;')
-        # else:
-        #     self.device.write(':READ?;')
-        voltage_value = 1 + 0.1 * (2 * (np.random.random() - 0.5))
-        return float(voltage_value)
-    
-    

@@ -86,12 +86,12 @@ class VACRegime(QWidget):
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
         self.voltage_min_input.setRange(-100, 100)
-        self.voltage_min_input.setDecimals(4)
         self.voltage_min_input.setValue(-1)
         self.voltage_max_input = QDoubleSpinBox()
         self.voltage_max_input.setRange(-100, 100)
-        self.voltage_max_input.setDecimals(4)
         self.voltage_max_input.setValue(1)
+        self.voltage_min_input.setDecimals(4)
+        self.voltage_max_input.setDecimals(4)
         voltage_range_layout.addWidget(QLabel('Vmin (V):'))
         voltage_range_layout.addWidget(self.voltage_min_input)
         voltage_range_layout.addWidget(QLabel('Vmax (V):'))
@@ -139,7 +139,8 @@ class VACRegime(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.voltage_now = QLabel('0 V')
         self.voltage_now.setAlignment(Qt.AlignCenter)
-        self.voltage_now.setStyleSheet("background-color: lightgray") 
+        self.voltage_now.setStyleSheet("background-color: lightgray")
+        self.voltage_now.adjustSize()
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
@@ -170,7 +171,7 @@ class VACRegime(QWidget):
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
         try:
-            self.compliance_current = eval(self.compliance_input.text())
+            self.compliance_current = float(eval(self.compliance_input.text()))
         except:
             QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
             return
@@ -187,6 +188,8 @@ class VACRegime(QWidget):
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
+        self.device.set_voltage(self.current_voltage)
+        time.sleep(5)
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if self.device == None:
             QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
@@ -194,19 +197,22 @@ class VACRegime(QWidget):
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
-            self.device.set_current_range(self.current_range)
+            self.device.set_current_range(eval(self.current_range))
         if type(self.device) == keithley.Keithley6430:
-            self.device.device.write(f":SENS:CURR:PROT {self.current_range_input.currentText()};")
+            self.device.device.write(f":SENS:CURR:PROT {self.compliance_input.text()};")
+            pass
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
         # Clear plots
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
+        
 
     def stop_measurement(self):
-        self.current_voltage = 0
+        self.current_voltage
         self.device.set_voltage(0)
         self.voltage_now.setText('0 V')
+        self.voltage_now.adjustSize()
         self.device.disable_output()
         self.timer.stop()
         self.make_plot()
@@ -221,14 +227,15 @@ class VACRegime(QWidget):
         noise_currents = []  # Store the current noise
 
         self.device.set_voltage(self.current_voltage)
-        self.voltage_now.setText('{:.2f} V'.format(self.current_voltage))
+        self.voltage_now.setText('{:.2f} V, n = {}'.format(self.current_voltage, self.n_runs))
+        self.voltage_now.adjustSize()
         p1 = None
         if len(self.measurements) > 0:
             p1 = self.measurements[-1][1]
             if p1 == 0: 
                 p1 = None
         if self.current_range == 'Auto-range':
-            current = keithley.auto_range(self.device, p1=p1)
+            current = keithley.auto_range(self.device, p1=p1, compl=(1 if type(self.device) == keithley.Keithley6517B else self.compliance_current))
         total_current += self.device.read_current()
         num_measurements += 1
         while self.elapsed_timer.elapsed() - start_time < self.collection_time:
@@ -244,10 +251,11 @@ class VACRegime(QWidget):
             average_current = 0
         # Check compliance current
         if abs(average_current) >= self.compliance_current:
-            self.stop_measurement()
-            QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
+            #self.stop_measurement()
+            #QMessageBox.critical(None, "Error", "Compliance current or current range exceeded")
+            pass
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current, self.direction))
+        self.measurements.append((self.current_voltage, average_current, self.direction, time.time()))
         self.noise_data.append(noise_currents)
         # Update plots
         self.update_plots()
@@ -278,13 +286,14 @@ class VACRegime(QWidget):
         # Update I(V) plot
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
-
+        self.iv_plot.plot([voltages[-1]], [currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
         self.iv_plot.setLabel('left', 'Current (A)')
         self.iv_plot.setLabel('bottom', 'Voltage (V)')
 
         # Update |I(V)| plot
         self.abs_iv_plot.plot(voltages, abs_currents, pen=pg.mkPen(color='r', width=2), clear=True)
         self.abs_iv_plot.plot(voltages, abs_currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
+        self.abs_iv_plot.plot([voltages[-1]], [abs_currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
         self.abs_iv_plot.setLabel('left', '|Current| (A)')
         self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
@@ -302,7 +311,7 @@ class VACRegime(QWidget):
 
 
     def get_pandas_data(self):
-        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction'])
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction', 'Timestamp'])
         return df
 
     def make_plot(self):
