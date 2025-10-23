@@ -69,9 +69,9 @@ class CurrentSourceAdapter:
                 self.resource.write(f":SOUR:CURR:RANG {current_range}")
             self.resource.write(":SOUR:CURR:LEV 0")
             self.resource.write(":FORM:ELEM VOLT,CURR")
-            self.resource.write(":SENS:FUNC 'VOLT'")
+            self.resource.write(":SENS:FUNC 'CURR'")
             try:
-                self.resource.write(f":SENS:VOLT:NPLC {float(nplc)}")
+                self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
             except Exception:
                 pass
             if compliance_voltage is not None:
@@ -223,7 +223,10 @@ class VoltageMeterAdapter:
                     self.resource.write(":SENS:VOLT:RANG {}".format(voltage_range))
                 except Exception:
                     pass
-            self.resource.write(":FORM:ELEM VOLT")
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
             try:
                 self.resource.write('OUTP OFF')
             except Exception:
@@ -266,39 +269,97 @@ class VoltageMeterAdapter:
                     pass
             else:
                 self.resource.write(f"VOLT:RANG {voltage_range}")
-            self.resource.write(":FORM:ELEM VOLT")
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
 
-    def read_voltage(self):
+    def read_measurement(self):
         if self.kind == 'mock':
-            # Mock voltmeter tied to mock source: reuse voltage level
-            return getattr(self.device, 'voltage_level', 0.0)
+            voltage = getattr(self.device, 'voltage_level', 0.0)
+            current = getattr(self.device, 'current_range', np.nan)
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
         if self.kind == 'smu':
             if self.resource is None:
-                return np.nan
-            try:
-                self.resource.write(":MEAS:VOLT?")
-                return float(self.resource.read().split(',')[0])
-            except Exception:
-                try:
-                    self.resource.write(":READ?")
-                    return float(self.resource.read().split(',')[0])
-                except Exception:
-                    return np.nan
-        if self.kind == '6514':
-            return float(self.device.read_voltage())
-        if self.kind == '2700':
-            return float(self.device.read_voltage())
-        if self.kind == '2002':
-            return float(self.device.meas_voltage_dc())
-        if self.kind == '6517B':
-            if self.resource is None:
-                return np.nan
+                return np.nan, np.nan
             try:
                 self.resource.write(":READ?")
-                return float(self.resource.read().split(',')[0])
+                resp = self.resource.read().strip().split(',')
+                voltage = float(resp[0])
+                current = float(resp[1]) if len(resp) > 1 else np.nan
+                return voltage, current
             except Exception:
-                return np.nan
-        return np.nan
+                try:
+                    self.resource.write(":MEAS:VOLT?")
+                    voltage = float(self.resource.read().split(',')[0])
+                except Exception:
+                    voltage = np.nan
+                try:
+                    self.resource.write(":MEAS:CURR?")
+                    current = float(self.resource.read().split(',')[0])
+                except Exception:
+                    current = np.nan
+                return voltage, current
+        if self.kind == '6514':
+            try:
+                voltage = float(self.device.read_voltage())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '2700':
+            try:
+                voltage = float(self.device.read_voltage())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '2002':
+            try:
+                voltage = float(self.device.meas_voltage_dc())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.meas_current_dc())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '6517B':
+            if self.resource is None:
+                return np.nan, np.nan
+            try:
+                self.resource.write(":READ?")
+                resp = self.resource.read().strip().split(',')
+                voltage = float(resp[0])
+                current = float(resp[1]) if len(resp) > 1 else np.nan
+                return voltage, current
+            except Exception:
+                try:
+                    self.resource.write(":MEAS:VOLT?")
+                    voltage = float(self.resource.read().split(',')[0])
+                except Exception:
+                    voltage = np.nan
+                try:
+                    self.resource.write(":MEAS:CURR?")
+                    current = float(self.resource.read().split(',')[0])
+                except Exception:
+                    current = np.nan
+                return voltage, current
+        return np.nan, np.nan
+
+    def read_voltage(self):
+        voltage, _ = self.read_measurement()
+        return voltage
 
     def close(self):
         if hasattr(self.device, 'close'):
@@ -319,6 +380,7 @@ class FourProbeResistance(QWidget):
         self.direction = 1
         self.remaining_runs = 0
         self.current_target = 0.0
+        self._eval_warning_shown = False
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.perform_measurement)
@@ -367,19 +429,12 @@ class FourProbeResistance(QWidget):
         contact_row.addWidget(self.contact_label_input)
         layout.addLayout(contact_row)
 
-        source_nplc_row = QHBoxLayout()
-        self.source_nplc = QComboBox()
-        self.source_nplc.addItems(['0.01', '0.1', '1', '10'])
-        source_nplc_row.addWidget(QLabel('Source NPLC:'))
-        source_nplc_row.addWidget(self.source_nplc)
-        layout.addLayout(source_nplc_row)
-
-        meter_nplc_row = QHBoxLayout()
-        self.meter_nplc = QComboBox()
-        self.meter_nplc.addItems(['0.01', '0.1', '1', '10'])
-        meter_nplc_row.addWidget(QLabel('Meter NPLC:'))
-        meter_nplc_row.addWidget(self.meter_nplc)
-        layout.addLayout(meter_nplc_row)
+        nplc_row = QHBoxLayout()
+        self.nplc_combo = QComboBox()
+        self.nplc_combo.addItems(['0.01', '0.1', '1', '10'])
+        nplc_row.addWidget(QLabel('NPLC:'))
+        nplc_row.addWidget(self.nplc_combo)
+        layout.addLayout(nplc_row)
 
         current_range_row = QHBoxLayout()
         self.current_range_combo = QComboBox()
@@ -407,14 +462,8 @@ class FourProbeResistance(QWidget):
         layout.addLayout(voltage_range_row)
 
         current_limits_row = QHBoxLayout()
-        self.current_min_input = QDoubleSpinBox()
-        self.current_min_input.setRange(-1.0, 1.0)
-        self.current_min_input.setDecimals(6)
-        self.current_min_input.setValue(-1e-5)
-        self.current_max_input = QDoubleSpinBox()
-        self.current_max_input.setRange(-1.0, 1.0)
-        self.current_max_input.setDecimals(6)
-        self.current_max_input.setValue(1e-5)
+        self.current_min_input = QLineEdit("-1e-5")
+        self.current_max_input = QLineEdit("1e-5")
         current_limits_row.addWidget(QLabel('Current min (A):'))
         current_limits_row.addWidget(self.current_min_input)
         current_limits_row.addWidget(QLabel('Current max (A):'))
@@ -422,10 +471,7 @@ class FourProbeResistance(QWidget):
         layout.addLayout(current_limits_row)
 
         current_step_row = QHBoxLayout()
-        self.current_step_input = QDoubleSpinBox()
-        self.current_step_input.setRange(1e-9, 1e-1)
-        self.current_step_input.setDecimals(9)
-        self.current_step_input.setValue(1e-6)
+        self.current_step_input = QLineEdit("1e-6")
         current_step_row.addWidget(QLabel('Current step (A):'))
         current_step_row.addWidget(self.current_step_input)
         layout.addLayout(current_step_row)
@@ -468,10 +514,13 @@ class FourProbeResistance(QWidget):
         self.plot_widget.setBackground('w')
         self.iv_plot = self.plot_widget.addPlot(title='Voltage vs Current')
         self.iv_plot.showGrid(x=True, y=True)
-        self.rh_plot = self.plot_widget.addPlot(title='Resistance vs Current')
-        self.rh_plot.showGrid(x=True, y=True)
-        self.rh_plot.setLabel('left', 'Resistance (Ohm)')
-        self.rh_plot.setLabel('bottom', 'Current (A)')
+        self.iv_plot.setLabel('left', 'Voltage (V)')
+        self.iv_plot.setLabel('bottom', 'Measured Source Current (A)')
+        self.current_plot = self.plot_widget.addPlot(title='Current Readings')
+        self.current_plot.showGrid(x=True, y=True)
+        self.current_plot.setLabel('left', 'Measured Current (A)')
+        self.current_plot.setLabel('bottom', 'Target Current (A)')
+        self.current_plot.addLegend()
         layout.addWidget(self.plot_widget)
 
         self.status_label = QLabel('')
@@ -503,6 +552,24 @@ class FourProbeResistance(QWidget):
             except Exception:
                 return None
 
+    def _eval_current_field(self, widget, field_name):
+        text = widget.text().strip()
+        if not text:
+            raise ValueError(f"{field_name} is required.")
+        if not self._eval_warning_shown:
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Current fields accept Python-style expressions (evaluated with eval). "
+                "Only enter trusted values.",
+            )
+            self._eval_warning_shown = True
+        try:
+            value = float(eval(text, {"__builtins__": {}}, {}))
+        except Exception as exc:
+            raise ValueError(f"Could not evaluate {field_name}: {text}") from exc
+        return value
+
     def _resolve_device(self, text, nplc):
         if text == 'Mock':
             return keithley.get_device('Mock', nplc=nplc)
@@ -511,9 +578,13 @@ class FourProbeResistance(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
-        current_min = self.current_min_input.value()
-        current_max = self.current_max_input.value()
-        current_step = self.current_step_input.value()
+        try:
+            current_min = self._eval_current_field(self.current_min_input, 'Current min')
+            current_max = self._eval_current_field(self.current_max_input, 'Current max')
+            current_step = self._eval_current_field(self.current_step_input, 'Current step')
+        except ValueError as exc:
+            QMessageBox.critical(self, "Error", str(exc))
+            return
         if current_step <= 0:
             QMessageBox.critical(self, "Error", "Current step must be positive.")
             return
@@ -526,13 +597,14 @@ class FourProbeResistance(QWidget):
         if meter_text == source_text:
             QMessageBox.critical(self, "Error", "Voltmeter must be different from the current source for four-probe measurements.")
             return
+        nplc_text = self.nplc_combo.currentText()
         try:
-            self.source_device = self._resolve_device(source_text, self.source_nplc.currentText())
+            self.source_device = self._resolve_device(source_text, nplc_text)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open source device: {exc}")
             return
         try:
-            self.voltage_device = self._resolve_device(meter_text, self.meter_nplc.currentText())
+            self.voltage_device = self._resolve_device(meter_text, nplc_text)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open voltmeter: {exc}")
             return
@@ -542,7 +614,7 @@ class FourProbeResistance(QWidget):
             self.source_adapter.configure(
                 current_range=self._parse_current_range(),
                 compliance_voltage=self.compliance_input.value(),
-                nplc=float(self.source_nplc.currentText()),
+                nplc=float(nplc_text),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to configure source: {exc}")
@@ -553,7 +625,7 @@ class FourProbeResistance(QWidget):
             self.voltmeter_adapter = VoltageMeterAdapter(self.voltage_device)
             self.voltmeter_adapter.configure(
                 voltage_range=self._parse_voltage_range(),
-                nplc=float(self.meter_nplc.currentText()),
+                nplc=float(nplc_text),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to configure voltmeter: {exc}")
@@ -573,7 +645,7 @@ class FourProbeResistance(QWidget):
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
         self.iv_plot.clear()
-        self.rh_plot.clear()
+        self.current_plot.clear()
         self.elapsed_timer.start()
         self.timer.start(max(50, int(self.collection_time / 5)))
         self.start_button.setEnabled(False)
@@ -593,21 +665,23 @@ class FourProbeResistance(QWidget):
 
         self.current_label.setText(f'Current target: {self.current_target:.3e} A')
         start_mark = self.elapsed_timer.elapsed()
-        currents = []
+        source_currents = []
         voltages = []
+        sense_currents = []
         avg_mode = self.average_checkbox.isChecked()
         sleep_window = max(0.002, self.collection_time / 1000.0 / 10.0)
         while self.elapsed_timer.elapsed() - start_mark < self.collection_time:
             current_value = self.source_adapter.read_current()
-            voltage_value = self.voltmeter_adapter.read_voltage()
-            currents.append(current_value)
+            voltage_value, sense_current = self.voltmeter_adapter.read_measurement()
+            source_currents.append(current_value)
             voltages.append(voltage_value)
+            sense_currents.append(sense_current)
             time.sleep(min(0.05, sleep_window))
 
-        if currents and avg_mode:
-            mean_current = float(np.nanmean(currents))
-        elif currents:
-            mean_current = float(currents[-1])
+        if source_currents and avg_mode:
+            mean_current = float(np.nanmean(source_currents))
+        elif source_currents:
+            mean_current = float(source_currents[-1])
         else:
             mean_current = np.nan
         if voltages and avg_mode:
@@ -616,20 +690,30 @@ class FourProbeResistance(QWidget):
             mean_voltage = float(voltages[-1])
         else:
             mean_voltage = np.nan
-
-        resistance = np.nan
-        if mean_current is not None and not np.isnan(mean_current) and abs(mean_current) > 1e-12:
-            resistance = mean_voltage / mean_current
+        valid_sense = [val for val in sense_currents if val is not None and not np.isnan(val)]
+        if valid_sense and avg_mode:
+            mean_sense_current = float(np.nanmean(valid_sense))
+        elif valid_sense:
+            mean_sense_current = float(valid_sense[-1])
+        else:
+            mean_sense_current = np.nan
 
         self.measurements.append(
             (
                 self.current_target,
                 mean_current,
+                mean_sense_current,
                 mean_voltage,
-                resistance,
                 self.direction,
                 time.time(),
             )
+        )
+        def fmt(val):
+            return 'n/a' if val is None or np.isnan(val) else f'{val:.3e}'
+
+        target_value = self.measurements[-1][0]
+        self.current_label.setText(
+            f'Iset {fmt(target_value)} A | Isrc {fmt(mean_current)} A | Isense {fmt(mean_sense_current)} A'
         )
         self.update_plots()
         self._advance_current()
@@ -664,32 +748,61 @@ class FourProbeResistance(QWidget):
                 QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
 
     def update_plots(self):
-        currents = [m[1] for m in self.measurements if not np.isnan(m[1])]
-        voltages = [m[2] for m in self.measurements if not np.isnan(m[2])]
-        resistances = [m[3] for m in self.measurements if not np.isnan(m[3])]
-        if currents and voltages:
-            self.iv_plot.plot(currents, voltages, pen=pg.mkPen(color='b', width=2), clear=True)
-            self.iv_plot.plot(currents, voltages, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 0, 255, 160))
-            self.iv_plot.setLabel('left', 'Voltage (V)')
-            self.iv_plot.setLabel('bottom', 'Current (A)')
-        if currents and resistances:
-            self.rh_plot.plot(currents, resistances, pen=pg.mkPen(color='r', width=2), clear=True)
-            self.rh_plot.plot(currents, resistances, pen=None, symbol='o', symbolSize=4, symbolBrush=(255, 0, 0, 160))
+        targets = [m[0] for m in self.measurements]
+        source_currents = [m[1] for m in self.measurements]
+        sense_currents = [m[2] for m in self.measurements]
+        voltages = [m[3] for m in self.measurements]
 
-        if resistances:
-            self.status_label.setText(f'Latest resistance: {resistances[-1]:.3e} Ohm')
+        iv_pairs = [
+            (sc, v)
+            for sc, v in zip(source_currents, voltages)
+            if sc is not None and v is not None and not np.isnan(sc) and not np.isnan(v)
+        ]
+        if iv_pairs:
+            xs = [p[0] for p in iv_pairs]
+            ys = [p[1] for p in iv_pairs]
+            self.iv_plot.plot(xs, ys, pen=pg.mkPen(color='b', width=2), clear=True)
+            self.iv_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 0, 255, 160))
+        else:
+            self.iv_plot.clear()
+
+        src_pairs = [
+            (t, sc)
+            for t, sc in zip(targets, source_currents)
+            if sc is not None and not np.isnan(sc)
+        ]
+        sns_pairs = [
+            (t, sc)
+            for t, sc in zip(targets, sense_currents)
+            if sc is not None and not np.isnan(sc)
+        ]
+        self.current_plot.clear()
+        if src_pairs:
+            xs = [p[0] for p in src_pairs]
+            ys = [p[1] for p in src_pairs]
+            self.current_plot.plot(xs, ys, pen=pg.mkPen(color='g', width=2), clear=False, name='Source current')
+            self.current_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 128, 0, 160))
+        if sns_pairs:
+            xs = [p[0] for p in sns_pairs]
+            ys = [p[1] for p in sns_pairs]
+            self.current_plot.plot(xs, ys, pen=pg.mkPen(color='r', width=2), clear=False, name='Sense current')
+            self.current_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(255, 0, 0, 120))
+
+        if self.measurements:
+            latest_target, latest_source, latest_sense, latest_voltage, *_ = self.measurements[-1]
+
+            def fmt(val):
+                return 'n/a' if val is None or np.isnan(val) else f'{val:.3e}'
+
+            self.status_label.setText(
+                f'Latest: V={fmt(latest_voltage)} V | Iset={fmt(latest_target)} A | '
+                f'Isrc={fmt(latest_source)} A | Isense={fmt(latest_sense)} A'
+            )
 
     def get_dataframe(self):
         return pd.DataFrame(
             self.measurements,
-            columns=[
-                'TargetCurrent',
-                'MeasuredCurrent',
-                'MeasuredVoltage',
-                'Resistance',
-                'Direction',
-                'Timestamp',
-            ],
+            columns=['TargetCurrent', 'SourceCurrent', 'SenseCurrent', 'MeasuredVoltage', 'Direction', 'Timestamp'],
         )
 
     def export_to_csv(self):
@@ -714,19 +827,22 @@ class FourProbeResistance(QWidget):
         name = f'{sample_name}_{contact_label}_{self.current_min}A_{self.current_max}A_{self.collection_time}ms'
 
         fig1 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['MeasuredCurrent'], df['MeasuredVoltage'], 'o-', markersize=3)
-        plt.xlabel('Current (A)')
+        plt.plot(df['SourceCurrent'], df['MeasuredVoltage'], 'o-', markersize=3)
+        plt.xlabel('Measured source current (A)')
         plt.ylabel('Voltage (V)')
         plt.grid(True)
         plt.savefig(op.join(plot_dir, f'FourProbe_IV_{name}_{self.start_time}.png'), dpi=300)
         fig1.clf()
 
         fig2 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['MeasuredCurrent'], df['Resistance'], 'o-', markersize=3)
-        plt.xlabel('Current (A)')
-        plt.ylabel('Resistance (Ohm)')
+        plt.plot(df['TargetCurrent'], df['SourceCurrent'], 'o-', markersize=3, label='Source current')
+        if df['SenseCurrent'].notna().any():
+            plt.plot(df['TargetCurrent'], df['SenseCurrent'], 'o-', markersize=3, label='Sense current')
+        plt.xlabel('Target current (A)')
+        plt.ylabel('Measured current (A)')
         plt.grid(True)
-        plt.savefig(op.join(plot_dir, f'FourProbe_R_{name}_{self.start_time}.png'), dpi=300)
+        plt.legend()
+        plt.savefig(op.join(plot_dir, f'FourProbe_I_{name}_{self.start_time}.png'), dpi=300)
         fig2.clf()
         matplotlib.pyplot.close(fig1)
         matplotlib.pyplot.close(fig2)
