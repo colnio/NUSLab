@@ -240,6 +240,7 @@ class VACRegime(QWidget):
         self.direction = 1
         print('Device address: ', self.device_address)
         self.device = keithley.get_device(self.device_address, nplc=self.nplc)
+        self.active_compliance = self.compliance_current
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
@@ -254,10 +255,16 @@ class VACRegime(QWidget):
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
-            self.device.set_current_range(eval(self.current_range))
+            try:
+                self.device.set_current_range(float(eval(self.current_range)))
+            except Exception:
+                QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
+                return
         if type(self.device) == keithley.Keithley6430:
             # Ensure a valid baseline compliance is set according to side/checkboxes
-            self._apply_compliance_for_voltage(self.current_voltage)  # at 0 V treat as 'pos'
+            comp = self._apply_compliance_for_voltage(self.current_voltage)  # at 0 V treat as 'pos'
+            if comp is not None:
+                self.active_compliance = comp
 
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
@@ -266,10 +273,17 @@ class VACRegime(QWidget):
         self.abs_iv_plot.clear()
 
     def stop_measurement(self):
-        self.device.set_voltage(0)
+        if self.device:
+            try:
+                self.device.set_voltage(0)
+            except Exception:
+                pass
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
         self.voltage_now.setText('0 V')
         self.voltage_now.adjustSize()
-        self.device.disable_output()
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()
@@ -292,7 +306,9 @@ class VACRegime(QWidget):
         crossed = (np.sign(self.current_voltage) != np.sign(self.prev_voltage))
         # print(crossed)
         if crossed and not (type(self.device) == keithley.Keithley6517B) and not (type(self.device) == keithley.Keithley6517B_Mock):
-            self.active_compliance = self._apply_compliance_for_voltage(self.current_voltage)
+            comp = self._apply_compliance_for_voltage(self.current_voltage)
+            if comp is not None:
+                self.active_compliance = comp
 
         p1 = None
         if len(self.measurements) > 0:

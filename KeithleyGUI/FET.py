@@ -206,14 +206,17 @@ class IVgRegime(QWidget):
         print(f"Gate device : {self.device_sd_address}")
         if self.device_gate_address == self.device_sd_address and (self.device_gate_address != 'Mock' or self.device_sd_address != 'Mock'):
             QMessageBox.critical(None, "Error", f"Choose different devices for gate and source-drain.")
+            return
         self.device_gate = keithley.get_device(self.device_gate_address, nplc=self.nplc)
         self.device_sd = keithley.get_device(self.device_sd_address, nplc=self.nplc)
 
         if self.device_gate == None:
             QMessageBox.critical(None, "Error", f"Gate device not found")
+            return
 
         if self.device_sd == None:
             QMessageBox.critical(None, "Error", f"Source-drain device not found")
+            return
 
 
         # Clear previous measurements and noise data
@@ -224,7 +227,12 @@ class IVgRegime(QWidget):
         if type(self.device_gate) == keithley.Keithley6517B:
             self.device_gate.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
-            self.device_sd.set_current_range(self.current_range)
+            try:
+                current_range_val = float(eval(self.current_range))
+            except Exception:
+                QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
+                return
+            self.device_sd.set_current_range(current_range_val)
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
@@ -236,10 +244,18 @@ class IVgRegime(QWidget):
     def stop_measurement(self):
         # if reset_voltage:
         self.current_voltage = 0
-        self.device_gate.set_voltage(0)
-        self.device_gate.disable_output()
-        self.device_sd.set_voltage(0)
-        self.device_sd.disable_output()
+        if self.device_gate:
+            try:
+                self.device_gate.set_voltage(0)
+                self.device_gate.disable_output()
+            except Exception:
+                pass
+        if self.device_sd:
+            try:
+                self.device_sd.set_voltage(0)
+                self.device_sd.disable_output()
+            except Exception:
+                pass
         self.timer.stop()
         self.make_plot()
         self.export_to_csv()

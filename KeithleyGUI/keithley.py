@@ -425,6 +425,7 @@ class Keithley6517B_Mock:
         self.nplc = nplc
         self.output_enabled = False
         self.voltage_level = 0.0
+        self.current_level = 0.0
         self.voltage_range = 0.0
         self.current_range = 0.0
         self.I_s = I_s  # Saturation current in Amps
@@ -875,6 +876,7 @@ class CurrentSourceAdapter:
         self.device = device
         self.resource = getattr(device, 'device', None)
         self.output_enabled = False
+        self.last_set_current = 0.0
         self.kind = self._detect_kind(device)
 
     def _detect_kind(self, device):
@@ -936,12 +938,19 @@ class CurrentSourceAdapter:
                 self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
             except Exception:
                 pass
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM CURR")
 
     def set_current(self, value):
         if self.kind == 'mock':
+            setattr(self.device, 'current_level', value)
+            # keep legacy mock behaviour that uses voltage_level as proxy input
             self.device.voltage_level = value
-            if not self.device.output_enabled:
+            if not getattr(self.device, 'output_enabled', False):
                 self.device.output_enabled = True
+            self.last_set_current = value
             return
         if self.resource is None:
             return
@@ -953,6 +962,7 @@ class CurrentSourceAdapter:
             self.output_enabled = True
         try:
             self.resource.write(f":SOUR:CURR:LEV {value}")
+            self.last_set_current = float(value)
         except Exception as exc:
             raise RuntimeError(f'Failed to program current level: {exc}')
 
@@ -991,12 +1001,41 @@ class CurrentSourceAdapter:
                     return np.nan
         return np.nan
 
+    def read_measurement(self):
+        if self.kind == 'mock':
+            voltage = getattr(self.device, 'voltage_level', np.nan)
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = float(getattr(self.device, 'current_level', np.nan))
+            return (float(voltage) if voltage is not None else np.nan,
+                    current if current is not None else np.nan)
+        if self.resource is not None:
+            try:
+                self.resource.write(":READ?")
+                resp = self.resource.read().strip().split(',')
+                numeric = []
+                for token in resp:
+                    try:
+                        numeric.append(float(token))
+                    except Exception:
+                        continue
+                if len(numeric) >= 2:
+                    return numeric[0], numeric[1]
+                if len(numeric) == 1:
+                    return np.nan, numeric[0]
+            except Exception:
+                pass
+        # Fallback to independent queries if :READ? flow failed
+        return self.read_voltage(), self.read_current()
+
     def disable(self):
         if self.kind == 'mock':
             try:
                 self.device.disable_output()
             except Exception:
                 pass
+            self.last_set_current = 0.0
             return
         if self.resource is not None:
             try:
@@ -1009,6 +1048,7 @@ class CurrentSourceAdapter:
             except Exception:
                 pass
         self.output_enabled = False
+        self.last_set_current = 0.0
 
 
 class VoltageMeterAdapter:
