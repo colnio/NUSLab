@@ -1151,31 +1151,19 @@ class VoltageMeterAdapter:
                 voltage = float(self.device.read_voltage())
             except Exception:
                 voltage = np.nan
-            try:
-                current = float(self.device.read_current())
-            except Exception:
-                current = np.nan
-            return voltage, current
+            return voltage, np.nan
         if self.kind == '2700':
             try:
                 voltage = float(self.device.read_voltage())
             except Exception:
                 voltage = np.nan
-            try:
-                current = float(self.device.read_current())
-            except Exception:
-                current = np.nan
-            return voltage, current
+            return voltage, np.nan
         if self.kind == '2002':
             try:
                 voltage = float(self.device.meas_voltage_dc())
             except Exception:
                 voltage = np.nan
-            try:
-                current = float(self.device.meas_current_dc())
-            except Exception:
-                current = np.nan
-            return voltage, current
+            return voltage, np.nan
         if self.kind == '6517B':
             if self.resource is None:
                 return np.nan, np.nan

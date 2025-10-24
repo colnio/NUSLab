@@ -176,11 +176,11 @@ class FourProbeResistance(QWidget):
         self.iv_plot = self.plot_widget.addPlot(title='Voltage vs Current')
         self.iv_plot.showGrid(x=True, y=True)
         self.iv_plot.setLabel('left', 'Voltage (V)')
-        self.iv_plot.setLabel('bottom', 'Measured Source Current (A)')
+        self.iv_plot.setLabel('bottom', 'Source-Drain Voltage (V)')
         self.current_plot = self.plot_widget.addPlot(title='Current Readings')
         self.current_plot.showGrid(x=True, y=True)
         self.current_plot.setLabel('left', 'Measured Current (A)')
-        self.current_plot.setLabel('bottom', 'Target Current (A)')
+        self.current_plot.setLabel('bottom', 'Measurement #')
         self.current_plot.addLegend()
         layout.addWidget(self.plot_widget)
 
@@ -326,56 +326,58 @@ class FourProbeResistance(QWidget):
 
         self.current_label.setText(f'Current target: {self.current_target:.3e} A')
         start_mark = self.elapsed_timer.elapsed()
-        source_currents = []
-        voltages = []
+        sd_currents = []
+        sd_voltages = []
+        probe_voltages = []
         sense_currents = []
         avg_mode = self.average_checkbox.isChecked()
         sleep_window = max(0.002, self.collection_time / 1000.0 / 10.0)
         while self.elapsed_timer.elapsed() - start_mark < self.collection_time:
-            current_value = self.source_adapter.read_current()
-            voltage_value, sense_current = self.voltmeter_adapter.read_measurement()
-            source_currents.append(current_value)
-            voltages.append(voltage_value)
+            sd_v, sd_i = self.source_adapter.read_measurement()
+            if sd_i is None or np.isnan(sd_i):
+                sd_i = self.source_adapter.read_current()
+            if sd_v is None or np.isnan(sd_v):
+                sd_v = self.source_adapter.read_voltage()
+            probe_v, sense_current = self.voltmeter_adapter.read_measurement()
+            sd_currents.append(sd_i)
+            sd_voltages.append(sd_v)
+            probe_voltages.append(probe_v)
             sense_currents.append(sense_current)
             time.sleep(min(0.05, sleep_window))
 
-        if source_currents and avg_mode:
-            mean_current = float(np.nanmean(source_currents))
-        elif source_currents:
-            mean_current = float(source_currents[-1])
-        else:
-            mean_current = np.nan
-        if voltages and avg_mode:
-            mean_voltage = float(np.nanmean(voltages))
-        elif voltages:
-            mean_voltage = float(voltages[-1])
-        else:
-            mean_voltage = np.nan
-        valid_sense = [val for val in sense_currents if val is not None and not np.isnan(val)]
-        if valid_sense and avg_mode:
-            mean_sense_current = float(np.nanmean(valid_sense))
-        elif valid_sense:
-            mean_sense_current = float(valid_sense[-1])
-        else:
-            mean_sense_current = np.nan
+        def avg(values):
+            vals = [v for v in values if v is not None and not np.isnan(v)]
+            if not vals:
+                return np.nan
+            if avg_mode:
+                return float(np.nanmean(vals))
+            return float(vals[-1])
 
-        self.measurements.append(
-            (
-                self.current_target,
-                mean_current,
-                mean_sense_current,
-                mean_voltage,
-                self.direction,
-                time.time(),
-            )
-        )
+        mean_sd_current = avg(sd_currents)
+        mean_sd_voltage = avg(sd_voltages)
+        mean_probe_voltage = avg(probe_voltages)
+        mean_sense_current = avg(sense_currents)
+
+        entry = {
+            'SourceDrainVoltage': mean_sd_voltage,
+            'SourceDrainCurrent': mean_sd_current,
+            'ProbeVoltage': mean_probe_voltage,
+            'SenseCurrent': mean_sense_current,
+            'Direction': self.direction,
+            'Timestamp': time.time(),
+        }
+        self.measurements.append(entry)
+
         def fmt(val):
             return 'n/a' if val is None or np.isnan(val) else f'{val:.3e}'
 
-        target_value = self.measurements[-1][0]
         self.current_label.setText(
-            f'Iset {fmt(target_value)} A | Isrc {fmt(mean_current)} A | Isense {fmt(mean_sense_current)} A'
+            f'Iset {fmt(self.current_target)} A | Isrc {fmt(mean_sd_current)} A | Isense {fmt(mean_sense_current)} A'
         )
+        self.status_label.setText(
+            f'Latest: Vsd={fmt(mean_sd_voltage)} V | Vprobe={fmt(mean_probe_voltage)} V | Direction {self.direction}'
+        )
+
         self.update_plots()
         self._advance_current()
 
@@ -409,15 +411,13 @@ class FourProbeResistance(QWidget):
                 QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
 
     def update_plots(self):
-        targets = [m[0] for m in self.measurements]
-        source_currents = [m[1] for m in self.measurements]
-        sense_currents = [m[2] for m in self.measurements]
-        voltages = [m[3] for m in self.measurements]
-
         iv_pairs = [
-            (sc, v)
-            for sc, v in zip(source_currents, voltages)
-            if sc is not None and v is not None and not np.isnan(sc) and not np.isnan(v)
+            (m['SourceDrainVoltage'], m['SourceDrainCurrent'])
+            for m in self.measurements
+            if m['SourceDrainVoltage'] is not None
+            and m['SourceDrainCurrent'] is not None
+            and not np.isnan(m['SourceDrainVoltage'])
+            and not np.isnan(m['SourceDrainCurrent'])
         ]
         if iv_pairs:
             xs = [p[0] for p in iv_pairs]
@@ -427,44 +427,39 @@ class FourProbeResistance(QWidget):
         else:
             self.iv_plot.clear()
 
-        src_pairs = [
-            (t, sc)
-            for t, sc in zip(targets, source_currents)
-            if sc is not None and not np.isnan(sc)
+        source_series = [
+            (idx, m['SourceDrainCurrent'])
+            for idx, m in enumerate(self.measurements)
+            if m['SourceDrainCurrent'] is not None and not np.isnan(m['SourceDrainCurrent'])
         ]
-        sns_pairs = [
-            (t, sc)
-            for t, sc in zip(targets, sense_currents)
-            if sc is not None and not np.isnan(sc)
+        sense_series = [
+            (idx, m.get('SenseCurrent'))
+            for idx, m in enumerate(self.measurements)
+            if m.get('SenseCurrent') is not None and not np.isnan(m.get('SenseCurrent'))
         ]
         self.current_plot.clear()
-        if src_pairs:
-            xs = [p[0] for p in src_pairs]
-            ys = [p[1] for p in src_pairs]
+        if source_series:
+            xs = [p[0] for p in source_series]
+            ys = [p[1] for p in source_series]
             self.current_plot.plot(xs, ys, pen=pg.mkPen(color='g', width=2), clear=False, name='Source current')
             self.current_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 128, 0, 160))
-        if sns_pairs:
-            xs = [p[0] for p in sns_pairs]
-            ys = [p[1] for p in sns_pairs]
+        if sense_series:
+            xs = [p[0] for p in sense_series]
+            ys = [p[1] for p in sense_series]
             self.current_plot.plot(xs, ys, pen=pg.mkPen(color='r', width=2), clear=False, name='Sense current')
             self.current_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(255, 0, 0, 120))
 
-        if self.measurements:
-            latest_target, latest_source, latest_sense, latest_voltage, *_ = self.measurements[-1]
-
-            def fmt(val):
-                return 'n/a' if val is None or np.isnan(val) else f'{val:.3e}'
-
-            self.status_label.setText(
-                f'Latest: V={fmt(latest_voltage)} V | Iset={fmt(latest_target)} A | '
-                f'Isrc={fmt(latest_source)} A | Isense={fmt(latest_sense)} A'
-            )
-
     def get_dataframe(self):
-        return pd.DataFrame(
-            self.measurements,
-            columns=['TargetCurrent', 'SourceCurrent', 'SenseCurrent', 'MeasuredVoltage', 'Direction', 'Timestamp'],
-        )
+        rows = []
+        for m in self.measurements:
+            rows.append({
+                'SourceDrainVoltage': m['SourceDrainVoltage'],
+                'SourceDrainCurrent': m['SourceDrainCurrent'],
+                'ProbeVoltage': m['ProbeVoltage'],
+                'Direction': m['Direction'],
+                'Timestamp': m['Timestamp'],
+            })
+        return pd.DataFrame(rows)
 
     def export_to_csv(self):
         sample_name = self.sample_name_input.text() or 'sample'
@@ -488,22 +483,19 @@ class FourProbeResistance(QWidget):
         name = f'{sample_name}_{contact_label}_{self.current_min}A_{self.current_max}A_{self.collection_time}ms'
 
         fig1 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['SourceCurrent'], df['MeasuredVoltage'], 'o-', markersize=3)
-        plt.xlabel('Measured source current (A)')
-        plt.ylabel('Voltage (V)')
+        plt.plot(df['SourceDrainVoltage'], df['SourceDrainCurrent'], 'o-', markersize=3)
+        plt.xlabel('Source-Drain Voltage (V)')
+        plt.ylabel('Source-Drain Current (A)')
         plt.grid(True)
         plt.savefig(op.join(plot_dir, f'FourProbe_IV_{name}_{self.start_time}.png'), dpi=300)
         fig1.clf()
 
         fig2 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['TargetCurrent'], df['SourceCurrent'], 'o-', markersize=3, label='Source current')
-        if df['SenseCurrent'].notna().any():
-            plt.plot(df['TargetCurrent'], df['SenseCurrent'], 'o-', markersize=3, label='Sense current')
-        plt.xlabel('Target current (A)')
-        plt.ylabel('Measured current (A)')
+        plt.plot(df['SourceDrainVoltage'], df['ProbeVoltage'], 'o-', markersize=3)
+        plt.xlabel('Source-Drain Voltage (V)')
+        plt.ylabel('Probe Voltage (V)')
         plt.grid(True)
-        plt.legend()
-        plt.savefig(op.join(plot_dir, f'FourProbe_I_{name}_{self.start_time}.png'), dpi=300)
+        plt.savefig(op.join(plot_dir, f'FourProbe_Vprobe_{name}_{self.start_time}.png'), dpi=300)
         fig2.clf()
         matplotlib.pyplot.close(fig1)
         matplotlib.pyplot.close(fig2)

@@ -40,9 +40,9 @@ class FourProbeFET(QWidget):
         self.probe_adapter = None
         self.gate_adapter = None
         self.measurements = []
-        self.sd_direction = 1
-        self.sd_remaining_runs = 0
-        self.sd_target = 0.0
+        self.sd_voltage_setpoint = 0.0
+        self.gate_direction = 1
+        self.gate_remaining_runs = 0
         self.gate_values = []
         self.current_gate_index = 0
         self.current_gate_target = 0.0
@@ -95,13 +95,8 @@ class FourProbeFET(QWidget):
         self.sd_voltage_range_combo.addItems(['Auto-range', '0.2', '2', '20', '200', '1000'])
         self.sd_voltage_range_combo.setMaximumWidth(110)
 
-        self.sd_min_input = QLineEdit("-0.5")
-        self.sd_min_input.setMaximumWidth(field_width)
-        self.sd_max_input = QLineEdit("0.5")
-        self.sd_max_input.setMaximumWidth(field_width)
-        self.sd_step_input = QLineEdit("0.05")
-        self.sd_step_input.setMaximumWidth(field_width)
-
+        self.sd_voltage_input = QLineEdit("0.1")
+        self.sd_voltage_input.setMaximumWidth(field_width)
         self.sd_compliance_input = QLineEdit("1e-3")
         self.sd_compliance_input.setMaximumWidth(field_width)
 
@@ -157,20 +152,16 @@ class FourProbeFET(QWidget):
         control_grid.addWidget(self.nruns_input, row, 5)
 
         row += 1
-        control_grid.addWidget(QLabel('SD Vmin'), row, 0)
-        control_grid.addWidget(self.sd_min_input, row, 1)
-        control_grid.addWidget(QLabel('SD Vmax'), row, 2)
-        control_grid.addWidget(self.sd_max_input, row, 3)
-        control_grid.addWidget(QLabel('SD Vstep'), row, 4)
-        control_grid.addWidget(self.sd_step_input, row, 5)
+        control_grid.addWidget(QLabel('SD Vset'), row, 0)
+        control_grid.addWidget(self.sd_voltage_input, row, 1)
+        control_grid.addWidget(QLabel('SD Compliance'), row, 2)
+        control_grid.addWidget(self.sd_compliance_input, row, 3)
+        control_grid.addWidget(QLabel('SD Range'), row, 4)
+        control_grid.addWidget(self.sd_voltage_range_combo, row, 5)
 
         row += 1
-        control_grid.addWidget(QLabel('SD Compliance'), row, 0)
-        control_grid.addWidget(self.sd_compliance_input, row, 1)
-        control_grid.addWidget(QLabel('SD Range'), row, 2)
-        control_grid.addWidget(self.sd_voltage_range_combo, row, 3)
-        control_grid.addWidget(QLabel('Avg ms'), row, 4)
-        control_grid.addWidget(self.collection_time_input, row, 5)
+        control_grid.addWidget(QLabel('Avg ms'), row, 0)
+        control_grid.addWidget(self.collection_time_input, row, 1)
 
         row += 1
         control_grid.addWidget(QLabel('Gate Vmin'), row, 0)
@@ -218,14 +209,14 @@ class FourProbeFET(QWidget):
         pg.setConfigOption('background', 'w')
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('w')
-        self.iv_plot = self.plot_widget.addPlot(title='I_sd vs V_sd')
+        self.iv_plot = self.plot_widget.addPlot(title='Ids vs Vg')
         self.iv_plot.showGrid(x=True, y=True)
         self.iv_plot.setLabel('left', 'Source-Drain Current (A)')
-        self.iv_plot.setLabel('bottom', 'Source-Drain Voltage (V)')
-        self.probe_plot = self.plot_widget.addPlot(title='Probe Voltage vs V_sd')
+        self.iv_plot.setLabel('bottom', 'Gate Voltage (V)')
+        self.probe_plot = self.plot_widget.addPlot(title='Probe Voltage vs Vg')
         self.probe_plot.showGrid(x=True, y=True)
         self.probe_plot.setLabel('left', 'Probe Voltage (V)')
-        self.probe_plot.setLabel('bottom', 'Source-Drain Voltage (V)')
+        self.probe_plot.setLabel('bottom', 'Gate Voltage (V)')
         self.plot_widget.nextRow()
         self.gate_plot = self.plot_widget.addPlot(title='Gate Leakage vs Gate Voltage')
         self.gate_plot.showGrid(x=True, y=True)
@@ -292,9 +283,7 @@ class FourProbeFET(QWidget):
         if self.timer.isActive():
             return
         try:
-            sd_min = self._eval_numeric_field(self.sd_min_input, 'Source-drain Vmin')
-            sd_max = self._eval_numeric_field(self.sd_max_input, 'Source-drain Vmax')
-            sd_step = self._eval_numeric_field(self.sd_step_input, 'Source-drain Vstep')
+            sd_voltage = self._eval_numeric_field(self.sd_voltage_input, 'Source-drain voltage')
             sd_compliance = self._eval_numeric_field(self.sd_compliance_input, 'Source-drain compliance current')
             gate_min = self._eval_numeric_field(self.gate_min_input, 'Gate Vmin')
             gate_max = self._eval_numeric_field(self.gate_max_input, 'Gate Vmax')
@@ -304,11 +293,8 @@ class FourProbeFET(QWidget):
             QMessageBox.critical(self, "Error", str(exc))
             return
 
-        if sd_step <= 0 or gate_step <= 0:
-            QMessageBox.critical(self, "Error", "Voltage steps must be positive.")
-            return
-        if sd_min > sd_max:
-            QMessageBox.critical(self, "Error", "SD Vmin must be <= Vmax.")
+        if gate_step <= 0:
+            QMessageBox.critical(self, "Error", "Gate voltage step must be positive.")
             return
         if gate_min > gate_max:
             QMessageBox.critical(self, "Error", "Gate Vmin must be <= Vmax.")
@@ -382,30 +368,26 @@ class FourProbeFET(QWidget):
 
         self.measurements = []
         try:
-            self.sd_values = self._build_sweep(sd_min, sd_max, sd_step)
-        except ValueError as exc:
-            QMessageBox.critical(self, "Error", str(exc))
-            self.cleanup_devices()
-            return
-        try:
             self.gate_values = self._build_sweep(gate_min, gate_max, gate_step)
         except ValueError as exc:
             QMessageBox.critical(self, "Error", str(exc))
             self.cleanup_devices()
             return
-
-        self.sd_min = sd_min
-        self.sd_max = sd_max
-        self.sd_step = sd_step
-        self.sd_direction = 1
-        self.sd_remaining_runs = self.nruns_input.value()
-        self.sd_target = sd_min
+        self.sd_voltage_setpoint = sd_voltage
+        self.gate_direction = 1
+        self.gate_remaining_runs = self.nruns_input.value()
         self.current_gate_index = 0
         self.current_gate_target = self.gate_values[0]
         try:
             self.gate_adapter.set_voltage(self.current_gate_target)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to set gate voltage: {exc}")
+            self.cleanup_devices()
+            return
+        try:
+            self.sd_adapter.set_voltage(self.sd_voltage_setpoint)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to set source-drain voltage: {exc}")
             self.cleanup_devices()
             return
 
@@ -439,9 +421,15 @@ class FourProbeFET(QWidget):
             return
 
         try:
-            self.sd_adapter.set_voltage(self.sd_target)
+            self.sd_adapter.set_voltage(self.sd_voltage_setpoint)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to set source-drain voltage: {exc}")
+            self.stop_measurement(save=True)
+            return
+        try:
+            self.gate_adapter.set_voltage(self.current_gate_target)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to set gate voltage: {exc}")
             self.stop_measurement(save=True)
             return
 
@@ -479,14 +467,12 @@ class FourProbeFET(QWidget):
         mean_gate_current = average_or_last(gate_currents)
 
         self.measurements.append({
-            'GateTarget': self.current_gate_target,
-            'SourceDrainTarget': self.sd_target,
             'SourceDrainVoltage': mean_sd_voltage,
             'SourceDrainCurrent': mean_sd_current,
-            'ProbeVoltage': mean_probe_voltage,
             'GateVoltage': mean_gate_voltage,
-            'GateLeakageCurrent': mean_gate_current,
-            'Direction': self.sd_direction,
+            'GateCurrent': mean_gate_current,
+            'ProbeVoltage': mean_probe_voltage,
+            'Direction': self.gate_direction,
             'Timestamp': time.time(),
         })
 
@@ -496,45 +482,29 @@ class FourProbeFET(QWidget):
         self.sd_status_label.setText(f'Ids: {fmt(mean_sd_current)} A @ Vsd {fmt(mean_sd_voltage)} V')
         self.probe_status_label.setText(f'Vprobe: {fmt(mean_probe_voltage)} V')
         self.gate_status_label.setText(f'Ig: {fmt(mean_gate_current)} A @ Vg {fmt(mean_gate_voltage)} V')
-        self.status_label.setText(f'Gate target {fmt(self.current_gate_target)} V | SD target {fmt(self.sd_target)} V')
+        self.status_label.setText(f'Gate target {fmt(self.current_gate_target)} V | Vsd set {fmt(self.sd_voltage_setpoint)} V')
 
         self.update_plots()
-        if not self._advance_sd():
+        if not self._advance_gate():
             self.stop_measurement(save=True)
 
-    def _advance_sd(self):
-        tol = abs(self.sd_step) * 0.5 + 1e-12
-        next_target = self.sd_target + self.sd_step * self.sd_direction
-
-        if self.sd_direction > 0 and next_target > self.sd_max + tol:
-            next_target = self.sd_max
-            self.sd_direction = -1
-            self.sd_remaining_runs -= 1
-        elif self.sd_direction < 0 and next_target < self.sd_min - tol:
-            next_target = self.sd_min
-            self.sd_direction = 1
-            self.sd_remaining_runs -= 1
-
-        if self.sd_remaining_runs <= 0 and self.sd_direction == 1 and abs(next_target - self.sd_min) <= tol:
-            return self._advance_gate()
-
-        self.sd_target = next_target
-        return True
-
     def _advance_gate(self):
-        self.sd_remaining_runs = self.nruns_input.value()
-        self.sd_direction = 1
-        self.sd_target = self.sd_min
-        self.current_gate_index += 1
-        if self.current_gate_index >= len(self.gate_values):
-            return False
+        next_index = self.current_gate_index + self.gate_direction
+        if next_index >= len(self.gate_values) or next_index < 0:
+            self.gate_direction *= -1
+            self.gate_remaining_runs -= 1
+            if self.gate_remaining_runs <= 0:
+                return False
+            next_index = self.current_gate_index + self.gate_direction
+            if next_index >= len(self.gate_values) or next_index < 0:
+                return False
+        self.current_gate_index = next_index
         self.current_gate_target = self.gate_values[self.current_gate_index]
         try:
             self.gate_adapter.set_voltage(self.current_gate_target)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to set gate voltage: {exc}")
             return False
-        # Small settle delay
         time.sleep(0.05)
         return True
 
@@ -570,44 +540,61 @@ class FourProbeFET(QWidget):
         self.probe_adapter = None
 
     def update_plots(self):
-        sd_voltages = [m['SourceDrainVoltage'] for m in self.measurements if not np.isnan(m['SourceDrainVoltage'])]
-        sd_currents = [m['SourceDrainCurrent'] for m in self.measurements if not np.isnan(m['SourceDrainCurrent'])]
-        probe_voltages = [m['ProbeVoltage'] for m in self.measurements if not np.isnan(m['ProbeVoltage'])]
-        gate_voltages = [m['GateVoltage'] for m in self.measurements if not np.isnan(m['GateVoltage'])]
-        gate_currents = [m['GateLeakageCurrent'] for m in self.measurements if not np.isnan(m['GateLeakageCurrent'])]
-
-        if sd_voltages and sd_currents:
-            self.iv_plot.plot(sd_voltages, sd_currents, pen=pg.mkPen(color='b', width=2), clear=True)
-            self.iv_plot.plot(sd_voltages, sd_currents, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 0, 255, 160))
+        iv_pairs = [
+            (m['GateVoltage'], m['SourceDrainCurrent'])
+            for m in self.measurements
+            if m['GateVoltage'] is not None and not np.isnan(m['GateVoltage'])
+            and m['SourceDrainCurrent'] is not None and not np.isnan(m['SourceDrainCurrent'])
+        ]
+        if iv_pairs:
+            xs = [p[0] for p in iv_pairs]
+            ys = [p[1] for p in iv_pairs]
+            self.iv_plot.plot(xs, ys, pen=pg.mkPen(color='b', width=2), clear=True)
+            self.iv_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 0, 255, 160))
         else:
             self.iv_plot.clear()
 
-        if sd_voltages and probe_voltages:
-            self.probe_plot.plot(sd_voltages, probe_voltages, pen=pg.mkPen(color='g', width=2), clear=True)
-            self.probe_plot.plot(sd_voltages, probe_voltages, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 128, 0, 160))
+        probe_pairs = [
+            (m['GateVoltage'], m['ProbeVoltage'])
+            for m in self.measurements
+            if m['GateVoltage'] is not None and not np.isnan(m['GateVoltage'])
+            and m['ProbeVoltage'] is not None and not np.isnan(m['ProbeVoltage'])
+        ]
+        if probe_pairs:
+            xs = [p[0] for p in probe_pairs]
+            ys = [p[1] for p in probe_pairs]
+            self.probe_plot.plot(xs, ys, pen=pg.mkPen(color='g', width=2), clear=True)
+            self.probe_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 128, 0, 160))
         else:
             self.probe_plot.clear()
 
-        if gate_voltages and gate_currents:
-            self.gate_plot.plot(gate_voltages, gate_currents, pen=pg.mkPen(color='r', width=2), clear=True)
-            self.gate_plot.plot(gate_voltages, gate_currents, pen=None, symbol='o', symbolSize=4, symbolBrush=(255, 0, 0, 160))
+        gate_pairs = [
+            (m['GateVoltage'], m['GateCurrent'])
+            for m in self.measurements
+            if m['GateVoltage'] is not None and not np.isnan(m['GateVoltage'])
+            and m['GateCurrent'] is not None and not np.isnan(m['GateCurrent'])
+        ]
+        if gate_pairs:
+            xs = [p[0] for p in gate_pairs]
+            ys = [p[1] for p in gate_pairs]
+            self.gate_plot.plot(xs, ys, pen=pg.mkPen(color='r', width=2), clear=True)
+            self.gate_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(255, 0, 0, 160))
         else:
             self.gate_plot.clear()
 
     def get_dataframe(self):
-        return pd.DataFrame(
-            [{
-                'SourceDrainCurrent': m['SourceDrainCurrent'],
+        rows = []
+        for m in self.measurements:
+            rows.append({
                 'SourceDrainVoltage': m['SourceDrainVoltage'],
-                'ProbeVoltage': m['ProbeVoltage'],
+                'SourceDrainCurrent': m['SourceDrainCurrent'],
                 'GateVoltage': m['GateVoltage'],
-                'GateLeakageCurrent': m['GateLeakageCurrent'],
+                'GateCurrent': m['GateCurrent'],
+                'ProbeVoltage': m['ProbeVoltage'],
                 'Direction': m['Direction'],
                 'Timestamp': m['Timestamp'],
-                'GateTarget': m['GateTarget'],
-                'SourceDrainTarget': m['SourceDrainTarget'],
-            } for m in self.measurements]
-        )
+            })
+        return pd.DataFrame(rows)
 
     def export_to_csv(self):
         sample_name = self.sample_name_input.text() or 'sample'
@@ -629,23 +616,23 @@ class FourProbeFET(QWidget):
         name = f'{sample_name}_FETFProbe_{self.start_time}'
 
         fig1 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['SourceDrainVoltage'], df['SourceDrainCurrent'], 'o-', markersize=3)
-        plt.xlabel('Source-Drain Voltage (V)')
+        plt.plot(df['GateVoltage'], df['SourceDrainCurrent'], 'o-', markersize=3)
+        plt.xlabel('Gate Voltage (V)')
         plt.ylabel('Source-Drain Current (A)')
         plt.grid(True)
         plt.savefig(op.join(plot_dir, f'FourProbeFET_IV_{name}.png'), dpi=300)
         fig1.clf()
 
         fig2 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['SourceDrainVoltage'], df['ProbeVoltage'], 'o-', markersize=3)
-        plt.xlabel('Source-Drain Voltage (V)')
+        plt.plot(df['GateVoltage'], df['ProbeVoltage'], 'o-', markersize=3)
+        plt.xlabel('Gate Voltage (V)')
         plt.ylabel('Probe Voltage (V)')
         plt.grid(True)
         plt.savefig(op.join(plot_dir, f'FourProbeFET_Probe_{name}.png'), dpi=300)
         fig2.clf()
 
         fig3 = plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(df['GateVoltage'], df['GateLeakageCurrent'], 'o-', markersize=3)
+        plt.plot(df['GateVoltage'], df['GateCurrent'], 'o-', markersize=3)
         plt.xlabel('Gate Voltage (V)')
         plt.ylabel('Gate Leakage Current (A)')
         plt.grid(True)
