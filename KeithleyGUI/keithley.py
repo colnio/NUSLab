@@ -861,3 +861,497 @@ class Keithley2002:
     # ---------- Close ----------
     def close(self):
         self.device.close()
+
+
+# ==========================================================
+# Adapter helpers for GUI measurement flows (current/voltage)
+# ==========================================================
+class CurrentSourceAdapter:
+    """
+    Wrap a current-source capable instrument (6517B/6430/etc.) to expose
+    simple configure/set/read helpers for GUI workflows.
+    """
+    def __init__(self, device):
+        self.device = device
+        self.resource = getattr(device, 'device', None)
+        self.output_enabled = False
+        self.kind = self._detect_kind(device)
+
+    def _detect_kind(self, device):
+        if isinstance(device, Keithley6517B_Mock):
+            return 'mock'
+        if isinstance(device, Keithley6517B):
+            return '6517B'
+        if isinstance(device, Keithley6430):
+            return 'smu'
+        return None
+
+    def configure(self, current_range=None, compliance_voltage=None, nplc=1.0):
+        if self.kind is None:
+            raise ValueError('Selected device cannot source current in this mode.')
+        if self.kind == 'mock':
+            return
+        if self.resource is None:
+            raise RuntimeError('Instrument VISA resource handle unavailable.')
+        try:
+            self.resource.write('*CLS')
+        except Exception:
+            pass
+
+        autorange = current_range is None
+        if self.kind == 'smu':
+            self.resource.write(":SOUR:FUNC CURR")
+            self.resource.write(":SOUR:CURR:MODE FIX")
+            if autorange:
+                self.resource.write(":SOUR:CURR:RANG:AUTO ON")
+            else:
+                self.resource.write(f":SOUR:CURR:RANG {current_range}")
+            self.resource.write(":SOUR:CURR:LEV 0")
+            self.resource.write(":FORM:ELEM VOLT,CURR")
+            self.resource.write(":SENS:FUNC 'CURR'")
+            try:
+                self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
+            except Exception:
+                pass
+            if compliance_voltage is not None:
+                try:
+                    self.resource.write(f":SENS:VOLT:PROT {compliance_voltage}")
+                except Exception:
+                    pass
+        elif self.kind == '6517B':
+            self.resource.write(":SOUR:FUNC CURR")
+            self.resource.write(":SOUR:CURR:MODE FIX")
+            if autorange:
+                self.resource.write(":SOUR:CURR:RANG:AUTO ON")
+            else:
+                self.resource.write(f":SOUR:CURR:RANG {current_range}")
+            self.resource.write(":SOUR:CURR:LEV 0")
+            if compliance_voltage is not None:
+                try:
+                    self.resource.write(f":SENS:VOLT:PROT {compliance_voltage}")
+                except Exception:
+                    pass
+            self.resource.write(":SENS:FUNC 'CURR'")
+            try:
+                self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
+            except Exception:
+                pass
+
+    def set_current(self, value):
+        if self.kind == 'mock':
+            self.device.voltage_level = value
+            if not self.device.output_enabled:
+                self.device.output_enabled = True
+            return
+        if self.resource is None:
+            return
+        if not self.output_enabled:
+            try:
+                self.resource.write('OUTP ON')
+            except Exception:
+                pass
+            self.output_enabled = True
+        try:
+            self.resource.write(f":SOUR:CURR:LEV {value}")
+        except Exception as exc:
+            raise RuntimeError(f'Failed to program current level: {exc}')
+
+    def read_current(self):
+        if hasattr(self.device, 'read_current'):
+            try:
+                return float(self.device.read_current(autorange=False))
+            except Exception:
+                pass
+        if self.kind == 'mock':
+            return float(self.device.read_current())
+        if self.resource is not None:
+            try:
+                self.resource.write(":MEAS:CURR?")
+                return float(self.resource.read().split(',')[0])
+            except Exception:
+                try:
+                    self.resource.write(":READ?")
+                    return float(self.resource.read().split(',')[1])
+                except Exception:
+                    return np.nan
+        return np.nan
+
+    def read_voltage(self):
+        if self.kind == 'mock':
+            return getattr(self.device, 'voltage_level', 0.0)
+        if self.resource is not None:
+            try:
+                self.resource.write(":MEAS:VOLT?")
+                return float(self.resource.read().split(',')[0])
+            except Exception:
+                try:
+                    self.resource.write(":READ?")
+                    return float(self.resource.read().split(',')[0])
+                except Exception:
+                    return np.nan
+        return np.nan
+
+    def disable(self):
+        if self.kind == 'mock':
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+            return
+        if self.resource is not None:
+            try:
+                self.resource.write('OUTP OFF')
+            except Exception:
+                pass
+        if hasattr(self.device, 'disable_output'):
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+        self.output_enabled = False
+
+
+class VoltageMeterAdapter:
+    """
+    Wrap a voltage-measuring instrument (SMU in sense mode, DMM, etc.)
+    to provide consistent configure/read helpers.
+    """
+    def __init__(self, device):
+        self.device = device
+        self.resource = getattr(device, 'device', None)
+        self.kind = self._detect_kind(device)
+
+    def _detect_kind(self, device):
+        if isinstance(device, Keithley6517B_Mock):
+            return 'mock'
+        if isinstance(device, Keithley6430):
+            return 'smu'
+        if isinstance(device, Keithley6514):
+            return '6514'
+        if isinstance(device, Keithley2700):
+            return '2700'
+        if isinstance(device, Keithley2002):
+            return '2002'
+        if isinstance(device, Keithley6517B):
+            return '6517B'
+        return None
+
+    def configure(self, voltage_range=None, nplc=1.0):
+        if self.kind is None:
+            raise ValueError('Selected device cannot measure voltage.')
+        if self.kind == 'mock':
+            return
+        if self.kind == 'smu':
+            if self.resource is None:
+                raise RuntimeError('Instrument VISA resource handle unavailable.')
+            try:
+                self.resource.write('*CLS')
+            except Exception:
+                pass
+            self.resource.write(":SOUR:FUNC CURR")
+            self.resource.write(":SOUR:CURR:MODE FIX")
+            self.resource.write(":SOUR:CURR:LEV 0")
+            self.resource.write(":SENS:FUNC 'VOLT'")
+            try:
+                self.resource.write(f":SENS:VOLT:NPLC {float(nplc)}")
+            except Exception:
+                pass
+            if voltage_range is None:
+                try:
+                    self.resource.write(":SENS:VOLT:RANG:AUTO ON")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.resource.write(f":SENS:VOLT:RANG {voltage_range}")
+                except Exception:
+                    pass
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
+            try:
+                self.resource.write('OUTP OFF')
+            except Exception:
+                pass
+        elif self.kind == '6514':
+            self.device.set_function('VOLT')
+            if voltage_range is None:
+                self.device.device.write("VOLT:RANG:AUTO ON")
+            else:
+                self.device.set_voltage_range(voltage_range)
+        elif self.kind == '2700':
+            self.device.set_function('VOLT')
+            if voltage_range is None:
+                self.device.set_voltage_range(auto=True)
+            else:
+                self.device.set_voltage_range(range_value=voltage_range)
+        elif self.kind == '2002':
+            self.device.set_function('VOLT:DC')
+            try:
+                self.device.set_nplc(float(nplc), func='VOLT:DC')
+            except Exception:
+                pass
+            if voltage_range is None:
+                self.device.set_range_auto(True, func='VOLT:DC')
+            else:
+                self.device.set_range(voltage_range, func='VOLT:DC')
+        elif self.kind == '6517B':
+            if self.resource is None:
+                raise RuntimeError('Instrument VISA resource handle unavailable.')
+            self.resource.write(":SYST:ZCH OFF")
+            self.resource.write(":SENS:FUNC 'VOLT'")
+            try:
+                self.resource.write(f":SENS:VOLT:NPLC {float(nplc)}")
+            except Exception:
+                pass
+            if voltage_range is None:
+                try:
+                    self.resource.write("VOLT:RANG:AUTO ON")
+                except Exception:
+                    pass
+            else:
+                self.resource.write(f"VOLT:RANG {voltage_range}")
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
+
+    def read_measurement(self):
+        if self.kind == 'mock':
+            voltage = getattr(self.device, 'voltage_level', 0.0)
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == 'smu':
+            if self.resource is None:
+                return np.nan, np.nan
+            try:
+                self.resource.write(":READ?")
+                resp = self.resource.read().strip().split(',')
+                voltage = float(resp[0])
+                current = float(resp[1]) if len(resp) > 1 else np.nan
+                return voltage, current
+            except Exception:
+                try:
+                    self.resource.write(":MEAS:VOLT?")
+                    voltage = float(self.resource.read().split(',')[0])
+                except Exception:
+                    voltage = np.nan
+                try:
+                    self.resource.write(":MEAS:CURR?")
+                    current = float(self.resource.read().split(',')[0])
+                except Exception:
+                    current = np.nan
+                return voltage, current
+        if self.kind == '6514':
+            try:
+                voltage = float(self.device.read_voltage())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '2700':
+            try:
+                voltage = float(self.device.read_voltage())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '2002':
+            try:
+                voltage = float(self.device.meas_voltage_dc())
+            except Exception:
+                voltage = np.nan
+            try:
+                current = float(self.device.meas_current_dc())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.kind == '6517B':
+            if self.resource is None:
+                return np.nan, np.nan
+            try:
+                self.resource.write(":READ?")
+                resp = self.resource.read().strip().split(',')
+                voltage = float(resp[0])
+                current = float(resp[1]) if len(resp) > 1 else np.nan
+                return voltage, current
+            except Exception:
+                try:
+                    self.resource.write(":MEAS:VOLT?")
+                    voltage = float(self.resource.read().split(',')[0])
+                except Exception:
+                    voltage = np.nan
+                try:
+                    self.resource.write(":MEAS:CURR?")
+                    current = float(self.resource.read().split(',')[0])
+                except Exception:
+                    current = np.nan
+                return voltage, current
+        return np.nan, np.nan
+
+    def read_voltage(self):
+        voltage, _ = self.read_measurement()
+        return voltage
+
+    def close(self):
+        if hasattr(self.device, 'close'):
+            try:
+                self.device.close()
+            except Exception:
+                pass
+
+
+class VoltageSourceAdapter:
+    """
+    Wrap a voltage-source capable instrument, providing set/read helpers and
+    compliance control for GUI sweeps.
+    """
+    def __init__(self, device):
+        self.device = device
+        self.resource = getattr(device, 'device', None)
+        self.output_enabled = False
+        self.kind = self._detect_kind(device)
+
+    def _detect_kind(self, device):
+        if isinstance(device, Keithley6517B_Mock):
+            return 'mock'
+        if isinstance(device, Keithley6517B):
+            return '6517B'
+        if isinstance(device, Keithley6430):
+            return 'smu'
+        return None
+
+    def configure(self, voltage_range=None, compliance_current=None, nplc=1.0):
+        if self.kind is None:
+            raise ValueError('Selected device cannot source voltage in this mode.')
+        if self.kind == 'mock':
+            return
+        if self.resource is None:
+            raise RuntimeError('Instrument VISA resource handle unavailable.')
+        try:
+            self.resource.write('*CLS')
+        except Exception:
+            pass
+
+        autorange = voltage_range is None
+        if self.kind == 'smu':
+            self.resource.write(":SOUR:FUNC VOLT")
+            self.resource.write(":SOUR:VOLT:MODE FIX")
+            if autorange:
+                self.resource.write(":SOUR:VOLT:RANG:AUTO ON")
+            else:
+                self.resource.write(f":SOUR:VOLT:RANG {voltage_range}")
+            self.resource.write(":SOUR:VOLT:LEV 0")
+            self.resource.write(":SENS:FUNC 'CURR'")
+            try:
+                self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
+            except Exception:
+                pass
+            if compliance_current is not None:
+                try:
+                    self.resource.write(f":SENS:CURR:PROT {compliance_current}")
+                    self.resource.write(f":SENS:CURR:RANG {abs(compliance_current)}")
+                except Exception:
+                    pass
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
+        elif self.kind == '6517B':
+            self.resource.write(":SOUR:FUNC VOLT")
+            self.resource.write(":SOUR:VOLT:MODE FIX")
+            if autorange:
+                self.resource.write(":SOUR:VOLT:RANG 1000")
+            else:
+                self.resource.write(f":SOUR:VOLT:RANG {voltage_range}")
+            self.resource.write(":SOUR:VOLT:LEV 0")
+            self.resource.write(":SENS:FUNC 'CURR'")
+            try:
+                self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
+            except Exception:
+                pass
+            if compliance_current is not None:
+                try:
+                    self.resource.write(f":SENS:CURR:PROT {compliance_current}")
+                except Exception:
+                    pass
+            try:
+                self.resource.write(":FORM:ELEM VOLT,CURR")
+            except Exception:
+                self.resource.write(":FORM:ELEM VOLT")
+
+    def set_voltage(self, voltage):
+        if self.kind == 'mock':
+            self.device.voltage_level = voltage
+            self.device.output_enabled = True
+            return
+        if self.resource is None:
+            return
+        try:
+            self.resource.write(f":SOUR:VOLT:LEV {voltage}")
+        except Exception as exc:
+            raise RuntimeError(f'Failed to program voltage level: {exc}')
+        if not self.output_enabled:
+            try:
+                self.resource.write('OUTP ON')
+            except Exception:
+                pass
+            self.output_enabled = True
+
+    def read_measurement(self):
+        if self.kind == 'mock':
+            voltage = getattr(self.device, 'voltage_level', np.nan)
+            try:
+                current = float(self.device.read_current())
+            except Exception:
+                current = np.nan
+            return voltage, current
+        if self.resource is not None:
+            try:
+                self.resource.write(":READ?")
+                resp = self.resource.read().strip().split(',')
+                voltage = float(resp[0])
+                current = float(resp[1]) if len(resp) > 1 else np.nan
+                return voltage, current
+            except Exception:
+                try:
+                    self.resource.write(":MEAS:VOLT?")
+                    voltage = float(self.resource.read().split(',')[0])
+                except Exception:
+                    voltage = np.nan
+                try:
+                    self.resource.write(":MEAS:CURR?")
+                    current = float(self.resource.read().split(',')[0])
+                except Exception:
+                    current = np.nan
+                return voltage, current
+        return np.nan, np.nan
+
+    def disable(self):
+        if self.kind == 'mock':
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+            return
+        if self.resource is not None:
+            try:
+                self.resource.write('OUTP OFF')
+            except Exception:
+                pass
+        if hasattr(self.device, 'disable_output'):
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+        self.output_enabled = False
