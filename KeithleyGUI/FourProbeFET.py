@@ -604,7 +604,7 @@ class FourProbeFET(QWidget):
             os.makedirs(data_dir, exist_ok=True)
         df = self.get_dataframe()
         name = f'{sample_name}_FETFProbe_{self.start_time}'
-        df.to_csv(op.join(data_dir, f'FourProbeFET_{name}.csv'), index=False)
+        df.to_csv(op.join(data_dir, f'FourProbeFET_{name}.data'), index=False)
 
     def make_plots(self):
         sample_name = self.sample_name_input.text() or 'sample'

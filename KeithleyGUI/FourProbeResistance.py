@@ -175,8 +175,8 @@ class FourProbeResistance(QWidget):
         self.plot_widget.setBackground('w')
         self.iv_plot = self.plot_widget.addPlot(title='Voltage vs Current')
         self.iv_plot.showGrid(x=True, y=True)
-        self.iv_plot.setLabel('left', 'Voltage (V)')
-        self.iv_plot.setLabel('bottom', 'Source-Drain Voltage (V)')
+        self.iv_plot.setLabel('left', 'SourceDrain current (A)')
+        self.iv_plot.setLabel('bottom', 'Probe Voltage (V)')
         self.current_plot = self.plot_widget.addPlot(title='Current Readings')
         self.current_plot.showGrid(x=True, y=True)
         self.current_plot.setLabel('left', 'Measured Current (A)')
@@ -412,11 +412,11 @@ class FourProbeResistance(QWidget):
 
     def update_plots(self):
         iv_pairs = [
-            (m['SourceDrainVoltage'], m['SourceDrainCurrent'])
+            (m['ProbeVoltage'], m['SourceDrainCurrent'])
             for m in self.measurements
-            if m['SourceDrainVoltage'] is not None
+            if m['ProbeVoltage'] is not None
             and m['SourceDrainCurrent'] is not None
-            and not np.isnan(m['SourceDrainVoltage'])
+            and not np.isnan(m['ProbeVoltage'])
             and not np.isnan(m['SourceDrainCurrent'])
         ]
         if iv_pairs:
@@ -470,7 +470,7 @@ class FourProbeResistance(QWidget):
             os.makedirs(data_dir, exist_ok=True)
         df = self.get_dataframe()
         name = f'{sample_name}_{contact_label}_{self.current_min}A_{self.current_max}A_{self.collection_time}ms'
-        df.to_csv(op.join(data_dir, f'FourProbe_{name}_{self.start_time}.csv'), index=False)
+        df.to_csv(op.join(data_dir, f'FourProbe_{name}_{self.start_time}.data'), index=False)
 
     def make_plots(self):
         sample_name = self.sample_name_input.text() or 'sample'

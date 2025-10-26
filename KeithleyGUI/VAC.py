@@ -266,7 +266,7 @@ class VACRegime(QWidget):
             if comp is not None:
                 self.active_compliance = comp
 
-        self.timer.start(50)  # Update every 50 ms
+        self.timer.start(5)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
         # Clear plots
         self.iv_plot.clear()

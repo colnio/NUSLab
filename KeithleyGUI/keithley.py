@@ -416,7 +416,7 @@ class Keithley6430:
         self.set_voltage(0)
         self.device.write('OUTP OFF')  # Turn the output off
         self.device.close()
-        print("Connection to Keithley 6517B closed.")
+        print("Connection to Keithley 6430 closed.")
 
 
 class Keithley6517B_Mock:
