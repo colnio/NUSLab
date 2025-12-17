@@ -61,7 +61,7 @@ class VACRegime(QWidget):
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
     def initUI(self):
-        self.setWindowTitle('Keithley 6517B IV')
+        self.setWindowTitle('Keithley IV')
         layout = QVBoxLayout()
 
         # keithley
@@ -98,10 +98,10 @@ class VACRegime(QWidget):
         # Voltage range input
         voltage_range_layout = QHBoxLayout()
         self.voltage_min_input = QDoubleSpinBox()
-        self.voltage_min_input.setRange(-100, 100)
+        self.voltage_min_input.setRange(-220, 220)
         self.voltage_min_input.setValue(-1)
         self.voltage_max_input = QDoubleSpinBox()
-        self.voltage_max_input.setRange(-100, 100)
+        self.voltage_max_input.setRange(-220, 220)
         self.voltage_max_input.setValue(1)
         self.voltage_min_input.setDecimals(4)
         self.voltage_max_input.setDecimals(4)
@@ -114,7 +114,7 @@ class VACRegime(QWidget):
         # Voltage step input
         voltage_step_layout = QHBoxLayout()
         self.voltage_step_input = QDoubleSpinBox()
-        self.voltage_step_input.setRange(0.0001, 1)
+        self.voltage_step_input.setRange(0.0001, 220)
         self.voltage_step_input.setValue(0.01)
         self.voltage_step_input.setDecimals(4)
         voltage_step_layout.addWidget(QLabel('Voltage step (V):'))
@@ -211,7 +211,7 @@ class VACRegime(QWidget):
         if (side == 'neg' and want_neg) or (side == 'pos' and want_pos):
             comp_to_set = user_comp
         else:
-            comp_to_set = 105e-3  # relaxed on unchecked side
+            comp_to_set = 1  # relaxed on unchecked side
 
         # Set the compliance on the instrument (method name as in your code)
         try:
@@ -335,7 +335,7 @@ class VACRegime(QWidget):
         if abs(average_current) >= self.compliance_current:
             pass
         # Store the data (voltage, average current)
-        self.measurements.append((self.current_voltage, average_current, self.direction, time.time()))
+        self.measurements.append((self.current_voltage, average_current, self.direction, time.time(), self.n_runs))
         self.noise_data.append(noise_currents)
         # Update plots
         self.update_plots()
@@ -363,8 +363,8 @@ class VACRegime(QWidget):
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
-        voltages = [m[0] for m in self.measurements]
-        currents = [m[1] for m in self.measurements]
+        voltages = [m[0] for m in self.measurements][-300::]
+        currents = [m[1] for m in self.measurements][-300::]
         abs_currents = [abs(i) for i in currents]
 
         # Update I(V) plot
@@ -395,7 +395,7 @@ class VACRegime(QWidget):
         del df
 
     def get_pandas_data(self):
-        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction', 'Timestamp'])
+        df = pd.DataFrame(self.measurements, columns=['Voltage', 'Current', 'Direction', 'Timestamp', 'Nruns'])
         return df
 
     def make_plot(self):

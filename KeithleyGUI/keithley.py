@@ -4,7 +4,7 @@ import numpy as np
 from pyvisa import ResourceManager
 
 def find_range(current):
-    ranges = 2 * 10.0**np.arange(-12.0, -1.0, 1.0)
+    ranges = 2 * 10.0**np.arange(-12.0, 1, 1.0)
     idx = np.where(ranges > current)[0]
     if len(idx) > 0:
         return ranges[min(idx)]
@@ -1276,7 +1276,9 @@ class VoltageSourceAdapter:
             self.resource.write(":SOUR:FUNC VOLT")
             self.resource.write(":SOUR:VOLT:MODE FIX")
             if autorange:
-                self.resource.write(":SOUR:VOLT:RANG:AUTO ON")
+                self.resource.write(f":SOUR:VOLT:RANG {200}")
+                # self.resource.write(":SOUR:VOLT:RANG:AUTO ON")
+                pass
             else:
                 self.resource.write(f":SOUR:VOLT:RANG {voltage_range}")
             self.resource.write(":SOUR:VOLT:LEV 0")

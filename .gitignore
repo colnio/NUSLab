@@ -170,3 +170,5 @@ data
 
 sampleDB/uploads/*
 sampleDB/sampleDB
+*ipynb
+*png

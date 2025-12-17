@@ -351,6 +351,7 @@ class FourProbeFET(QWidget):
 
         try:
             self.gate_adapter = keithley.VoltageSourceAdapter(self.gate_device)
+            # self.gate_adapter.device.write()
             self.gate_adapter.configure(
                 voltage_range=self._parse_voltage_range(self.gate_voltage_range_combo),
                 compliance_current=gate_compliance,
@@ -519,7 +520,8 @@ class FourProbeFET(QWidget):
         if self.gate_adapter:
             try:
                 self.gate_adapter.set_voltage(0.0)
-            except Exception:
+            except Exception as e:
+                print(e)
                 pass
             self.gate_adapter.disable()
         if self.probe_adapter:
@@ -528,12 +530,12 @@ class FourProbeFET(QWidget):
         self.stop_button.setEnabled(False)
         self.status_label.setText('Measurement stopped.')
 
-        if save and self.measurements:
-            try:
-                self.export_to_csv()
-                self.make_plots()
-            except Exception as exc:
-                QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
+        # if save and self.measurements:
+        try:
+            self.export_to_csv()
+            self.make_plots()
+        except Exception as exc:
+            QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
 
         self.sd_adapter = None
         self.gate_adapter = None
