@@ -112,6 +112,11 @@ CURRENT_RANGE_GRID_A = [
     1e-2,
 ]
 IV_START_RANGE_A = 1e-11  # 10 pA
+IV_UP_VOTES_REQUIRED = 2
+IV_DOWN_VOTES_REQUIRED = 2
+IV_RANGE_TOL_FRAC = 0.02
+IV_UP_FRACTION = 0.85
+IV_DOWN_FRACTION_OF_LOWER = 0.30
 
 CSV_FIELDS = [
     "timestamp_unix",
@@ -138,7 +143,9 @@ CSV_FIELDS = [
     "param1",
     "C_F",
     "R_Ohm",
+    "demod_R_raw",
     "demod_R",
+    "demod_R_gain",
     "Z_real_Ohm",
     "Z_imag_Ohm",
     "Z_abs_Ohm",
@@ -412,7 +419,7 @@ def compute_model_values(
     return cap, res
 
 
-def extract_demod_r(sample: Dict, demod_sample: Optional[Dict], z_abs: float) -> float:
+def extract_demod_current(sample: Dict, demod_sample: Optional[Dict]) -> float:
     # Prefer explicit demodulator sample fields first.
     sources = [demod_sample or {}, sample]
     for src in sources:
@@ -427,6 +434,14 @@ def extract_demod_r(sample: Dict, demod_sample: Optional[Dict], z_abs: float) ->
         y = to_float(src.get("y"))
         if np.isfinite(x) and np.isfinite(y):
             return float(math.hypot(x, y))
+
+    return float("nan")
+
+
+def extract_demod_r(sample: Dict, demod_sample: Optional[Dict], z_abs: float) -> float:
+    demod = extract_demod_current(sample, demod_sample)
+    if np.isfinite(demod):
+        return float(demod)
 
     if np.isfinite(z_abs):
         return float(z_abs)
@@ -746,14 +761,10 @@ class SweepWorker(QObject):
         mode = "manual_ladder"
 
         # Disable auto-range and drive range explicitly in IV mode.
-        try_set_int(daq, [f"{base}/auto/inputrange"], 0)
-        if curr_idx is not None:
-            cbase = f"/{dev}/currins/{curr_idx}"
-            try_set_int(daq, [f"{cbase}/on"], 1)
-            try_set_int(daq, [f"{cbase}/autorange"], 0)
+        self._iv_enforce_manual_mode(daq, dev, imps, curr_idx)
 
         ranges = self._detect_supported_ranges(daq, dev, imps, curr_idx)
-        if not ranges:
+        if len(ranges) < 2:
             ranges = list(CURRENT_RANGE_GRID_A)
             mode = "manual_ladder_fallback"
 
@@ -780,36 +791,159 @@ class SweepWorker(QObject):
             "curr_idx": curr_idx,
             "ranges": ranges,
             "range_index": range_idx,
+            "up_votes": 0,
+            "down_votes": 0,
         }
+
+    def _iv_enforce_manual_mode(
+        self, daq: zi.ziDAQServer, dev: str, imps: int, curr_idx: Optional[int]
+    ) -> None:
+        base = f"/{dev}/imps/{imps}"
+        try_set_int(
+            daq,
+            [
+                f"{base}/auto/inputrange",
+                f"{base}/current/autorange",
+                f"{base}/current/range/autorange",
+                f"{base}/autorange",
+            ],
+            0,
+        )
+        if curr_idx is not None:
+            cbase = f"/{dev}/currins/{curr_idx}"
+            try_set_int(daq, [f"{cbase}/on"], 1)
+            try_set_int(daq, [f"{cbase}/autorange"], 0)
+
+    def _range_close_value(self, a: float, b: float, frac: float = IV_RANGE_TOL_FRAC) -> bool:
+        if not np.isfinite(a) or not np.isfinite(b):
+            return False
+        tol = max(1e-15, float(frac) * max(abs(float(a)), abs(float(b))))
+        return abs(float(a) - float(b)) <= tol
+
+    def _iv_get_target_range(self, iv_state: Dict[str, object]) -> Optional[float]:
+        ranges = iv_state.get("ranges")
+        if not isinstance(ranges, list) or len(ranges) == 0:
+            return None
+        idx = int(iv_state.get("range_index", 0))
+        idx = max(0, min(idx, len(ranges) - 1))
+        try:
+            return float(ranges[idx])
+        except Exception:
+            return None
+
+    def _iv_lock_manual_range(
+        self,
+        daq: zi.ziDAQServer,
+        dev: str,
+        imps: int,
+        iv_state: Dict[str, object],
+        logger: Optional[logging.Logger] = None,
+    ) -> bool:
+        ranges = iv_state.get("ranges")
+        if not isinstance(ranges, list) or len(ranges) == 0:
+            return False
+
+        currin_idx = iv_state.get("curr_idx")
+        currin_use = int(currin_idx) if isinstance(currin_idx, int) else None
+        self._iv_enforce_manual_mode(daq, dev, imps, currin_use)
+
+        target = self._iv_get_target_range(iv_state)
+        if target is None or not np.isfinite(target) or target <= 0:
+            return False
+
+        state = self._read_range_state(daq, dev, imps, currin_use)
+        actual = state[1] if (currin_use is not None and np.isfinite(state[1])) else state[0]
+        if np.isfinite(actual) and self._range_close_value(float(actual), float(target)):
+            return False
+
+        self._set_current_range(daq, dev, imps, currin_use, float(target))
+        state2 = self._read_range_state(daq, dev, imps, currin_use)
+        actual2 = state2[1] if (currin_use is not None and np.isfinite(state2[1])) else state2[0]
+        if np.isfinite(actual2):
+            actual_idx = int(np.argmin(np.abs(np.array(ranges, dtype=float) - float(actual2))))
+            iv_state["range_index"] = max(0, min(actual_idx, len(ranges) - 1))
+
+        if logger is not None:
+            self._log(
+                logger,
+                f"IV manual range lock: target={target:.3e} A, before={actual:.3e} A, after={actual2:.3e} A",
+            )
+        return True
 
     def _set_current_range(
         self, daq: zi.ziDAQServer, dev: str, imps: int, curr_idx: Optional[int], value_a: float
     ) -> None:
         base = f"/{dev}/imps/{imps}"
-        try_set_double(daq, [f"{base}/current/range"], float(value_a))
-        if curr_idx is not None:
-            try_set_double(daq, [f"/{dev}/currins/{curr_idx}/range"], float(value_a))
+        target = float(value_a)
+        for _ in range(3):
+            self._iv_enforce_manual_mode(daq, dev, imps, curr_idx)
+            # Program both nodes; apply current-input node last so its value takes precedence
+            # for IV sensitivity when both exist.
+            try_set_double(daq, [f"{base}/current/range"], target)
+            if curr_idx is not None:
+                try_set_double(daq, [f"/{dev}/currins/{curr_idx}/range"], target)
+                try_set_int(daq, [f"/{dev}/currins/{curr_idx}/rangestep/trigger"], 1)
+
+            time.sleep(0.01)
+            st = self._read_range_state(daq, dev, imps, curr_idx)
+            imps_ok = np.isfinite(st[0]) and self._range_close_value(float(st[0]), target)
+            curr_ok = (curr_idx is None) or (
+                np.isfinite(st[1]) and self._range_close_value(float(st[1]), target)
+            )
+            if imps_ok and curr_ok:
+                break
 
     def _detect_supported_ranges(
         self, daq: zi.ziDAQServer, dev: str, imps: int, curr_idx: Optional[int]
     ) -> List[float]:
         original = self._read_range_state(daq, dev, imps, curr_idx)
-        found: List[float] = []
+        found_imps: List[float] = []
+        found_currin: List[float] = []
 
         for cand in CURRENT_RANGE_GRID_A:
             self._set_current_range(daq, dev, imps, curr_idx, float(cand))
-            time.sleep(0.01)
-            st = self._read_range_state(daq, dev, imps, curr_idx)
-            actual = st[0] if np.isfinite(st[0]) else st[1]
-            if not np.isfinite(actual):
-                continue
-            if not any(abs(actual - x) <= max(1e-15, 0.01 * max(abs(actual), abs(x))) for x in found):
-                found.append(float(actual))
+            # Some firmware applies new range with delay; read a few times.
+            st = (float("nan"), float("nan"))
+            for _ in range(3):
+                time.sleep(0.02)
+                st = self._read_range_state(daq, dev, imps, curr_idx)
+            act_imps = st[0]
+            act_curr = st[1]
+            if np.isfinite(act_imps):
+                if not any(
+                    abs(act_imps - x) <= max(1e-15, 0.01 * max(abs(act_imps), abs(x)))
+                    for x in found_imps
+                ):
+                    found_imps.append(float(act_imps))
+            if np.isfinite(act_curr):
+                if not any(
+                    abs(act_curr - x) <= max(1e-15, 0.01 * max(abs(act_curr), abs(x)))
+                    for x in found_currin
+                ):
+                    found_currin.append(float(act_curr))
 
         if np.isfinite(original[0]) or np.isfinite(original[1]):
             restore_val = original[0] if np.isfinite(original[0]) else original[1]
             self._set_current_range(daq, dev, imps, curr_idx, float(restore_val))
 
+        # Extra direct probe on current-input node to catch fine ranges.
+        if curr_idx is not None:
+            for cand in CURRENT_RANGE_GRID_A:
+                try_set_double(daq, [f"/{dev}/currins/{curr_idx}/range"], float(cand))
+                try_set_int(daq, [f"/{dev}/currins/{curr_idx}/rangestep/trigger"], 1)
+                time.sleep(0.03)
+                actual_ci = to_float(try_get_double(daq, f"/{dev}/currins/{curr_idx}/range"))
+                if not np.isfinite(actual_ci):
+                    continue
+                if not any(
+                    abs(actual_ci - x) <= max(1e-15, 0.01 * max(abs(actual_ci), abs(x)))
+                    for x in found_currin
+                ):
+                    found_currin.append(float(actual_ci))
+            if np.isfinite(original[1]):
+                self._set_current_range(daq, dev, imps, curr_idx, float(original[1]))
+
+        found = found_currin if len(found_currin) >= 2 else found_imps
         found = sorted(found)
         return found
 
@@ -830,34 +964,67 @@ class SweepWorker(QObject):
         imps: int,
         iv_state: Dict[str, object],
         est_current_a: float,
+        norm_peak: float = float("nan"),
+        demod_current_a: float = float("nan"),
         logger: Optional[logging.Logger] = None,
     ) -> bool:
         ranges = iv_state.get("ranges")
         if not isinstance(ranges, list) or len(ranges) == 0:
             return False
-        if not np.isfinite(est_current_a):
-            return False
 
-        i_abs = abs(float(est_current_a))
         curr_idx = int(iv_state.get("range_index", len(ranges) - 1))
         curr_idx = max(0, min(curr_idx, len(ranges) - 1))
         curr_range = float(ranges[curr_idx])
         if not np.isfinite(curr_range) or curr_range <= 0:
             return False
 
-        # Keep signal around ~65% of range for sensitivity without clipping.
-        target_fraction = 0.65
-        need = max(i_abs / target_fraction, 1e-15)
-        new_idx = 0
-        while new_idx < len(ranges) - 1 and float(ranges[new_idx]) < need:
-            new_idx += 1
-
-        hi = 0.90 * curr_range
-        lo = 0.25 * curr_range
-        if new_idx == curr_idx:
+        # IV range control is driven by demodR (current in 0R/IV mode).
+        # Current-input min/max are only fallback if demod data is unavailable.
+        if np.isfinite(demod_current_a):
+            i_ref = abs(float(demod_current_a))
+        elif np.isfinite(est_current_a):
+            i_ref = abs(float(est_current_a))
+        elif np.isfinite(norm_peak):
+            i_ref = abs(float(norm_peak)) * curr_range
+        else:
             return False
-        if i_abs <= hi and i_abs >= lo:
-            # Inside hysteresis band; avoid unnecessary switching.
+
+        # Keep demod utilization in a stable band:
+        # up when close to clipping on current range, down only when safely inside
+        # the next-smaller range to avoid range-chatter.
+        new_idx = curr_idx
+        up_limit = float(IV_UP_FRACTION) * curr_range
+        if (i_ref >= up_limit) and (curr_idx < len(ranges) - 1):
+            new_idx = curr_idx + 1
+        elif curr_idx > 0:
+            lower_range = float(ranges[curr_idx - 1])
+            down_limit = float(IV_DOWN_FRACTION_OF_LOWER) * lower_range
+            if i_ref <= down_limit:
+                new_idx = curr_idx - 1
+
+        up_votes = int(iv_state.get("up_votes", 0))
+        down_votes = int(iv_state.get("down_votes", 0))
+
+        # Vote-based hysteresis: prevent one noisy sample from causing a range jump.
+        if new_idx > curr_idx:
+            up_votes += 1
+            down_votes = 0
+            iv_state["up_votes"] = up_votes
+            iv_state["down_votes"] = down_votes
+            if up_votes < IV_UP_VOTES_REQUIRED:
+                return False
+        elif new_idx < curr_idx:
+            down_votes += 1
+            up_votes = 0
+            iv_state["up_votes"] = up_votes
+            iv_state["down_votes"] = down_votes
+            if down_votes < IV_DOWN_VOTES_REQUIRED:
+                return False
+        else:
+            iv_state["up_votes"] = 0
+            iv_state["down_votes"] = 0
+
+        if new_idx == curr_idx:
             return False
 
         new_range = float(ranges[new_idx])
@@ -867,10 +1034,28 @@ class SweepWorker(QObject):
         else:
             currin_use = None
         self._set_current_range(daq, dev, imps, currin_use, new_range)
-        iv_state["range_index"] = new_idx
+        # Track the actual accepted range if readable.
+        st = self._read_range_state(daq, dev, imps, currin_use)
+        actual = st[1] if (currin_use is not None and np.isfinite(st[1])) else st[0]
+        if np.isfinite(actual):
+            actual_idx = int(np.argmin(np.abs(np.array(ranges, dtype=float) - float(actual))))
+            iv_state["range_index"] = max(0, min(actual_idx, len(ranges) - 1))
+            if logger is not None and not self._range_close_value(float(actual), new_range):
+                self._log(
+                    logger,
+                    f"Warning: IV range write requested {new_range:.3e} A but device reports {actual:.3e} A",
+                )
+        else:
+            iv_state["range_index"] = new_idx
+        iv_state["up_votes"] = 0
+        iv_state["down_votes"] = 0
 
         if logger is not None:
-            self._log(logger, f"IV range -> {new_range:.3e} A (|I|={i_abs:.3e} A)")
+            util = i_ref / curr_range if curr_range > 0 else float("nan")
+            self._log(
+                logger,
+                f"IV range -> {new_range:.3e} A (|I_demod|={i_ref:.3e} A, util={util:.2f})",
+            )
         return True
 
     def _iv_autorange_step(
@@ -1057,8 +1242,9 @@ class SweepWorker(QObject):
                     f"Block {block_idx}/{n_blocks}: {block.name} mode={block.mode}, points={block_points}",
                 )
 
-                iv_mode = block.mode == "bias" and math.isclose(
-                    block.fixed_amplitude, 0.0, rel_tol=0.0, abs_tol=1e-12
+                iv_mode = block.mode == "bias" and (
+                    math.isclose(block.fixed_amplitude, 0.0, rel_tol=0.0, abs_tol=1e-12)
+                    or math.isclose(block.fixed_frequency, 0.0, rel_tol=0.0, abs_tol=1e-12)
                 )
                 iv_state = {"mode": "off", "curr_idx": None}
                 if iv_mode:
@@ -1072,6 +1258,16 @@ class SweepWorker(QObject):
                 # if range switched, discard first sample and take one settled reread.
                 use_range_guard = (not iv_mode) and (self.cfg.inputrange_mode != 0)
                 prev_point_range_state: Optional[Tuple[float, float]] = None
+                if use_range_guard:
+                    self._log(
+                        logger,
+                        f"{block.mode.upper()} range guard enabled (input range mode={self.cfg.inputrange_mode}).",
+                    )
+                elif not iv_mode:
+                    self._log(
+                        logger,
+                        f"{block.mode.upper()} running with manual input range mode.",
+                    )
 
                 order_tag = "zmaxminz" if block.order == "zero_max_min_zero" else "zminmaxz"
                 block_file = data_dir / (
@@ -1087,6 +1283,11 @@ class SweepWorker(QObject):
                     prev_curr_max = float("nan")
                     prev_curr_range = float("nan")
                     prev_current_est = float("nan")
+                    prev_norm_peak = float("nan")
+                    prev_demod_current = float("nan")
+                    prev_demod_corr = float("nan")
+                    prev_demod_range = float("nan")
+                    range_gain_map: Dict[float, float] = {}
                     range_stabilize_warned = False
                     range_guard_warned = False
 
@@ -1123,15 +1324,20 @@ class SweepWorker(QObject):
                             time.sleep(block.settle_s)
 
                         if iv_mode:
+                            locked = self._iv_lock_manual_range(
+                                daq, dev, self.cfg.imps, iv_state, logger
+                            )
                             changed = self._iv_manual_range_step(
                                 daq,
                                 dev,
                                 self.cfg.imps,
                                 iv_state,
                                 prev_current_est,
+                                prev_norm_peak,
+                                prev_demod_current,
                                 logger,
                             )
-                            if changed:
+                            if locked or changed:
                                 time.sleep(max(0.03, block.settle_s))
 
                         if use_range_stabilization:
@@ -1231,7 +1437,14 @@ class SweepWorker(QObject):
                             z_phase = float("nan")
 
                         cap_f, res_ohm = compute_model_values(self.cfg.model, param0, param1, meas_freq)
-                        demod_r = extract_demod_r(sample, demod_sample, z_abs)
+                        demod_current = extract_demod_current(sample, demod_sample)
+                        if iv_mode:
+                            # In IV mode use demodR strictly as measured current (A).
+                            demod_r_raw = (
+                                float(demod_current) if np.isfinite(demod_current) else float("nan")
+                            )
+                        else:
+                            demod_r_raw = extract_demod_r(sample, demod_sample, z_abs)
                         model_name, p0_name, p1_name = MODEL_INFO.get(
                             self.cfg.model, ("Unknown", "param0", "param1")
                         )
@@ -1252,17 +1465,56 @@ class SweepWorker(QObject):
                                 currin_peak = max(abs(currin_min), abs(currin_max)) * currin_range
 
                         imps_curr_range = range_state[0]
+                        demod_r_gain = 1.0
+                        demod_r = demod_r_raw
+                        range_for_demod = (
+                            float(currin_range) if np.isfinite(currin_range) else float(imps_curr_range)
+                        )
+                        if iv_mode and np.isfinite(range_for_demod):
+                            if range_for_demod not in range_gain_map:
+                                range_gain_map[range_for_demod] = 1.0
+                            if (
+                                np.isfinite(prev_demod_range)
+                                and (not math.isclose(prev_demod_range, range_for_demod, rel_tol=0.0, abs_tol=1e-15))
+                                and np.isfinite(prev_demod_corr)
+                                and np.isfinite(demod_r_raw)
+                                and abs(float(demod_r_raw)) > 0.0
+                            ):
+                                new_gain = float(prev_demod_corr) / float(demod_r_raw)
+                                if np.isfinite(new_gain) and new_gain > 0:
+                                    old_gain = range_gain_map.get(range_for_demod, 1.0)
+                                    if np.isfinite(old_gain) and old_gain > 0:
+                                        range_gain_map[range_for_demod] = 0.7 * float(old_gain) + 0.3 * new_gain
+                                    else:
+                                        range_gain_map[range_for_demod] = new_gain
+                            demod_r_gain = float(range_gain_map.get(range_for_demod, 1.0))
+                            if np.isfinite(demod_r_raw):
+                                demod_r = float(demod_r_raw) * demod_r_gain
+                            else:
+                                demod_r = float("nan")
+
                         prev_curr_min = currin_min
                         prev_curr_max = currin_max
                         prev_curr_range = currin_range if np.isfinite(currin_range) else imps_curr_range
-                        if np.isfinite(demod_r):
-                            prev_current_est = abs(float(demod_r))
+                        prev_norm_peak = (
+                            max(abs(float(currin_min)), abs(float(currin_max)))
+                            if np.isfinite(currin_min) and np.isfinite(currin_max)
+                            else float("nan")
+                        )
+                        # IV range control uses demodR current first, then current-input fallback.
+                        if np.isfinite(demod_current):
+                            prev_current_est = abs(float(demod_current))
                         elif np.isfinite(currin_peak):
                             prev_current_est = abs(float(currin_peak))
                         elif np.isfinite(currin_est):
                             prev_current_est = abs(float(currin_est))
                         else:
                             prev_current_est = float("nan")
+                        prev_demod_current = (
+                            abs(float(demod_current)) if np.isfinite(demod_current) else float("nan")
+                        )
+                        prev_demod_corr = float(demod_r) if np.isfinite(demod_r) else float("nan")
+                        prev_demod_range = float(range_for_demod) if np.isfinite(range_for_demod) else float("nan")
 
                         ts = time.time()
                         row = {
@@ -1292,7 +1544,9 @@ class SweepWorker(QObject):
                             "param1": param1,
                             "C_F": cap_f,
                             "R_Ohm": res_ohm,
+                            "demod_R_raw": demod_r_raw,
                             "demod_R": demod_r,
+                            "demod_R_gain": demod_r_gain,
                             "Z_real_Ohm": z_real,
                             "Z_imag_Ohm": z_imag,
                             "Z_abs_Ohm": z_abs,
