@@ -6,10 +6,11 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox,
-    QLineEdit, QMessageBox, QCheckBox
+    QLineEdit, QMessageBox, QCheckBox, QProgressBar
 )
 from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 import pandas as pd
 import time
 import datetime
@@ -62,14 +63,22 @@ class VACRegime(QWidget):
 
     def initUI(self):
         self.setWindowTitle('Keithley IV')
+        self.resize(1400, 900)
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         # keithley
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
+        device_address_layout.addWidget(self.refresh_button)
+        device_address_layout.addWidget(self.refresh_status_label)
         layout.addLayout(device_address_layout)
 
         # sample name
@@ -159,17 +168,26 @@ class VACRegime(QWidget):
         # Start/Stop button
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.voltage_now = QLabel('0 V')
         self.voltage_now.setAlignment(Qt.AlignCenter)
         self.voltage_now.setStyleSheet("background-color: lightgray")
         self.voltage_now.adjustSize()
         self.stop_button = QPushButton('Stop Measurement')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
+
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.eta_label)
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -178,15 +196,67 @@ class VACRegime(QWidget):
         # I(V) plot
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
-        self.iv_plot.showGrid(x=True, y=True)
+        self.iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.iv_plot.setLabel('left', 'Current', units='A')
+        self.iv_plot.setLabel('bottom', 'Voltage', units='V')
+        self.iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.abs_iv_plot = self.plot_widget.addPlot(title="|I(V)|")
-        self.abs_iv_plot.showGrid(x=True, y=True)
+        self.abs_iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.abs_iv_plot.setLabel('left', '|Current|', units='A')
+        self.abs_iv_plot.setLabel('bottom', 'Voltage', units='V')
+        self.abs_iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.abs_iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
 
         # Enable logarithmic scale for abs(I(V))
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
 
         layout.addWidget(self.plot_widget)
         self.setLayout(layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(keithley, [self.device_address_input], include_mock=True)
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
+
+    def estimate_total_steps(self):
+        if self.voltage_step <= 0:
+            return 1
+        runs = int(self.n_runs)
+        direction = 1
+        voltage = 0.0
+        steps = 0
+        max_iter = 5_000_000
+        while steps < max_iter:
+            steps += 1
+            voltage += self.voltage_step * direction
+            if voltage > self.voltage_max:
+                voltage = self.voltage_max
+                direction *= -1
+                runs -= 1
+            if voltage < self.voltage_min:
+                voltage = self.voltage_min
+                direction *= -1
+                runs -= 1
+            if runs <= 0 and abs(voltage) <= self.voltage_step / 10:
+                break
+        return max(1, steps)
 
     # ===================== Helper: set compliance per polarity =====================
     def _apply_compliance_for_voltage(self, voltage):
@@ -265,6 +335,9 @@ class VACRegime(QWidget):
             comp = self._apply_compliance_for_voltage(self.current_voltage)  # at 0 V treat as 'pos'
             if comp is not None:
                 self.active_compliance = comp
+        self.total_steps = self.estimate_total_steps()
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
 
         self.timer.start(5)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
@@ -339,6 +412,11 @@ class VACRegime(QWidget):
         self.noise_data.append(noise_currents)
         # Update plots
         self.update_plots()
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"V={self.current_voltage:.3f} V"
+        )
         # Track previous voltage for sign-cross detection
         self.prev_voltage = np.sign(self.current_voltage)
         # Move to the next voltage step
@@ -372,16 +450,11 @@ class VACRegime(QWidget):
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
         if voltages:
             self.iv_plot.plot([voltages[-1]], [currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
-        self.iv_plot.setLabel('left', 'Current (A)')
-        self.iv_plot.setLabel('bottom', 'Voltage (V)')
-
         # Update |I(V)| plot
         self.abs_iv_plot.plot(voltages, abs_currents, pen=pg.mkPen(color='r', width=2), clear=True)
         self.abs_iv_plot.plot(voltages, abs_currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
         if voltages:
             self.abs_iv_plot.plot([voltages[-1]], [abs_currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
-        self.abs_iv_plot.setLabel('left', '|Current| (A)')
-        self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
     def export_to_csv(self):
         sample_dir = op.join(self.folder, self.date, self.sample_name)

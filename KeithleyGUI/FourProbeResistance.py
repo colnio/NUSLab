@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QFormLayout,
+    QGridLayout,
     QLabel,
     QDoubleSpinBox,
     QSpinBox,
@@ -26,9 +28,14 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QCheckBox,
+    QProgressBar,
+    QGroupBox,
+    QSizePolicy,
+    QFrame,
 )
 
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 
 class FourProbeResistance(QWidget):
     def __init__(self):
@@ -59,135 +66,200 @@ class FourProbeResistance(QWidget):
 
     def init_ui(self):
         self.setWindowTitle('Keithley Four-Probe Resistance')
-        layout = QVBoxLayout()
+        self.resize(1500, 900)
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
 
         device_list = [' - '.join(entry) for entry in keithley.get_devices_list()]
         device_list.append('Mock')
 
-        source_row = QHBoxLayout()
+        conn_box = QGroupBox("Connection")
+        conn_layout = QGridLayout()
+        conn_layout.setHorizontalSpacing(10)
+        conn_layout.setVerticalSpacing(6)
         self.source_combo = QComboBox()
         self.source_combo.addItems(device_list)
-        source_row.addWidget(QLabel('Current source:'))
-        source_row.addWidget(self.source_combo)
-        layout.addLayout(source_row)
-
-        meter_row = QHBoxLayout()
+        self.source_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
         self.voltmeter_combo = QComboBox()
         self.voltmeter_combo.addItems(device_list)
-        meter_row.addWidget(QLabel('Voltmeter:'))
-        meter_row.addWidget(self.voltmeter_combo)
-        layout.addLayout(meter_row)
+        self.voltmeter_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        conn_layout.addWidget(QLabel('Current source:'), 0, 0)
+        conn_layout.addWidget(self.source_combo, 0, 1, 1, 3)
+        conn_layout.addWidget(self.refresh_button, 0, 4)
+        conn_layout.addWidget(self.refresh_status_label, 0, 5)
+        conn_layout.addWidget(QLabel('Voltmeter:'), 1, 0)
+        conn_layout.addWidget(self.voltmeter_combo, 1, 1, 1, 5)
+        conn_box.setLayout(conn_layout)
 
-        sample_row = QHBoxLayout()
+        sample_box = QGroupBox("Sample")
+        sample_layout = QFormLayout()
+        sample_layout.setHorizontalSpacing(10)
+        sample_layout.setVerticalSpacing(6)
         self.sample_name_input = QLineEdit()
-        sample_row.addWidget(QLabel('Sample name:'))
-        sample_row.addWidget(self.sample_name_input)
-        layout.addLayout(sample_row)
-
-        contact_row = QHBoxLayout()
         self.contact_label_input = QLineEdit()
-        contact_row.addWidget(QLabel('Contact pair label:'))
-        contact_row.addWidget(self.contact_label_input)
-        layout.addLayout(contact_row)
+        sample_layout.addRow('Sample name:', self.sample_name_input)
+        sample_layout.addRow('Contact pair label:', self.contact_label_input)
+        sample_box.setLayout(sample_layout)
 
-        nplc_row = QHBoxLayout()
+        sweep_box = QGroupBox("Sweep")
+        sweep_layout = QGridLayout()
+        sweep_layout.setHorizontalSpacing(10)
+        sweep_layout.setVerticalSpacing(6)
         self.nplc_combo = QComboBox()
         self.nplc_combo.addItems(['0.01', '0.1', '1', '10'])
-        nplc_row.addWidget(QLabel('NPLC:'))
-        nplc_row.addWidget(self.nplc_combo)
-        layout.addLayout(nplc_row)
-
-        current_range_row = QHBoxLayout()
         self.current_range_combo = QComboBox()
         current_ranges = list((2 * 10.0 ** np.arange(-9.0, -1.0, 1.0)).astype(str))
         self.current_range_combo.addItems(['Auto-range'] + current_ranges)
-        current_range_row.addWidget(QLabel('Current range (A):'))
-        current_range_row.addWidget(self.current_range_combo)
-        layout.addLayout(current_range_row)
-
-        compliance_row = QHBoxLayout()
         self.compliance_input = QDoubleSpinBox()
         self.compliance_input.setRange(0.0, 1000.0)
         self.compliance_input.setValue(10.0)
         self.compliance_input.setDecimals(3)
-        compliance_row.addWidget(QLabel('Compliance voltage (V):'))
-        compliance_row.addWidget(self.compliance_input)
-        layout.addLayout(compliance_row)
-
-        voltage_range_row = QHBoxLayout()
         self.voltage_range_combo = QComboBox()
         voltage_ranges = ['0.002', '0.02', '0.2', '2', '20', '200', '1000']
         self.voltage_range_combo.addItems(['Auto-range'] + voltage_ranges)
-        voltage_range_row.addWidget(QLabel('Voltage range (V):'))
-        voltage_range_row.addWidget(self.voltage_range_combo)
-        layout.addLayout(voltage_range_row)
-
-        current_limits_row = QHBoxLayout()
         self.current_min_input = QLineEdit("-1e-5")
         self.current_max_input = QLineEdit("1e-5")
-        current_limits_row.addWidget(QLabel('Current min (A):'))
-        current_limits_row.addWidget(self.current_min_input)
-        current_limits_row.addWidget(QLabel('Current max (A):'))
-        current_limits_row.addWidget(self.current_max_input)
-        layout.addLayout(current_limits_row)
-
-        current_step_row = QHBoxLayout()
         self.current_step_input = QLineEdit("1e-6")
-        current_step_row.addWidget(QLabel('Current step (A):'))
-        current_step_row.addWidget(self.current_step_input)
-        layout.addLayout(current_step_row)
-
-        run_row = QHBoxLayout()
         self.nruns_input = QSpinBox()
         self.nruns_input.setRange(1, 1000)
         self.nruns_input.setValue(2)
-        run_row.addWidget(QLabel('N runs (2 = up/down):'))
-        run_row.addWidget(self.nruns_input)
-        layout.addLayout(run_row)
-
-        collection_row = QHBoxLayout()
         self.collection_time_input = QSpinBox()
         self.collection_time_input.setRange(10, 10000)
         self.collection_time_input.setValue(1000)
-        collection_row.addWidget(QLabel('Averaging time (ms):'))
-        collection_row.addWidget(self.collection_time_input)
-        layout.addLayout(collection_row)
+        sweep_layout.addWidget(QLabel('NPLC'), 0, 0)
+        sweep_layout.addWidget(self.nplc_combo, 0, 1)
+        sweep_layout.addWidget(QLabel('Current range (A)'), 0, 2)
+        sweep_layout.addWidget(self.current_range_combo, 0, 3)
+        sweep_layout.addWidget(QLabel('Compliance voltage (V)'), 1, 0)
+        sweep_layout.addWidget(self.compliance_input, 1, 1)
+        sweep_layout.addWidget(QLabel('Voltage range (V)'), 1, 2)
+        sweep_layout.addWidget(self.voltage_range_combo, 1, 3)
+        sweep_layout.addWidget(QLabel('Current min (A)'), 2, 0)
+        sweep_layout.addWidget(self.current_min_input, 2, 1)
+        sweep_layout.addWidget(QLabel('Current max (A)'), 2, 2)
+        sweep_layout.addWidget(self.current_max_input, 2, 3)
+        sweep_layout.addWidget(QLabel('Current step (A)'), 3, 0)
+        sweep_layout.addWidget(self.current_step_input, 3, 1)
+        sweep_layout.addWidget(QLabel('N runs (2 = up/down)'), 3, 2)
+        sweep_layout.addWidget(self.nruns_input, 3, 3)
+        sweep_layout.addWidget(QLabel('Averaging time (ms)'), 4, 0)
+        sweep_layout.addWidget(self.collection_time_input, 4, 1)
 
         self.average_checkbox = QCheckBox('Average source current and measured voltage')
         self.average_checkbox.setChecked(True)
-        layout.addWidget(self.average_checkbox)
+        sweep_layout.addWidget(self.average_checkbox, 4, 2, 1, 2)
+        sweep_box.setLayout(sweep_layout)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(conn_box, 2)
+        top_row.addWidget(sample_box, 1)
+        root_layout.addLayout(top_row)
+        root_layout.addWidget(sweep_box)
 
         button_row = QHBoxLayout()
         self.start_button = QPushButton('Start')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         self.stop_button.setEnabled(False)
         self.current_label = QLabel('Current: 0 A')
         self.current_label.setAlignment(Qt.AlignCenter)
+        self.start_button.setMinimumHeight(32)
+        self.stop_button.setMinimumHeight(32)
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.current_label)
         button_row.addWidget(self.stop_button)
-        layout.addLayout(button_row)
+        root_layout.addLayout(button_row)
 
         pg.setConfigOption('background', 'w')
+        pg.setConfigOption('foreground', 'k')
+        pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('w')
         self.iv_plot = self.plot_widget.addPlot(title='Voltage vs Current')
-        self.iv_plot.showGrid(x=True, y=True)
-        self.iv_plot.setLabel('left', 'SourceDrain current (A)')
-        self.iv_plot.setLabel('bottom', 'Probe Voltage (V)')
+        self.iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.iv_plot.setLabel('left', 'Source-Drain current', units='A')
+        self.iv_plot.setLabel('bottom', 'Probe voltage', units='V')
+        self.iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.current_plot = self.plot_widget.addPlot(title='Current Readings')
-        self.current_plot.showGrid(x=True, y=True)
-        self.current_plot.setLabel('left', 'Measured Current (A)')
+        self.current_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.current_plot.setLabel('left', 'Measured current', units='A')
         self.current_plot.setLabel('bottom', 'Measurement #')
+        self.current_plot.getAxis('left').enableAutoSIPrefix(True)
         self.current_plot.addLegend()
-        layout.addWidget(self.plot_widget)
+        root_layout.addWidget(self.plot_widget, 1)
 
         self.status_label = QLabel('')
-        layout.addWidget(self.status_label)
+        self.status_label.setFrameShape(QFrame.StyledPanel)
+        self.status_label.setMinimumHeight(24)
+        root_layout.addWidget(self.status_label)
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        root_layout.addWidget(self.progress_bar)
 
-        self.setLayout(layout)
+        footer = QHBoxLayout()
+        footer.addWidget(self.progress_label, 2)
+        footer.addWidget(self.eta_label, 1)
+        root_layout.addLayout(footer)
+
+        self.setLayout(root_layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(
+                keithley,
+                [self.source_combo, self.voltmeter_combo],
+                include_mock=True,
+            )
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
+
+    def estimate_total_steps(self):
+        if self.current_step <= 0:
+            return 1
+        direction = 1
+        current = self.current_min
+        runs = int(self.remaining_runs)
+        steps = 0
+        max_iter = 5_000_000
+        while steps < max_iter:
+            steps += 1
+            current += self.current_step * direction
+            if current > self.current_max:
+                current = self.current_max
+                direction *= -1
+                runs -= 1
+            elif current < self.current_min:
+                current = self.current_min
+                direction *= -1
+                runs -= 1
+            if runs <= 0 and abs(current) <= self.current_step / 10:
+                break
+        return max(1, steps)
 
     def _parse_current_range(self):
         selected = self.current_range_combo.currentText()
@@ -304,6 +376,9 @@ class FourProbeResistance(QWidget):
         self.remaining_runs = self.nruns_input.value()
         self.collection_time = self.collection_time_input.value()
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
+        self.total_steps = self.estimate_total_steps()
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
 
         self.iv_plot.clear()
         self.current_plot.clear()
@@ -379,6 +454,11 @@ class FourProbeResistance(QWidget):
         )
 
         self.update_plots()
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"Iset={self.current_target:.3e} A",
+        )
         self._advance_current()
 
     def _advance_current(self):
@@ -420,10 +500,11 @@ class FourProbeResistance(QWidget):
             and not np.isnan(m['SourceDrainCurrent'])
         ]
         if iv_pairs:
-            xs = [p[0] for p in iv_pairs]
-            ys = [p[1] for p in iv_pairs]
-            self.iv_plot.plot(xs, ys, pen=pg.mkPen(color='b', width=2), clear=True)
-            self.iv_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 0, 255, 160))
+            iv_sorted = sorted(iv_pairs, key=lambda p: p[0])
+            xs = [p[0] for p in iv_sorted]
+            ys = [p[1] for p in iv_sorted]
+            self.iv_plot.plot(xs, ys, pen=pg.mkPen(color=(25, 95, 185), width=2), clear=True)
+            self.iv_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=5, symbolBrush=(25, 95, 185, 120))
         else:
             self.iv_plot.clear()
 
@@ -441,7 +522,7 @@ class FourProbeResistance(QWidget):
         if source_series:
             xs = [p[0] for p in source_series]
             ys = [p[1] for p in source_series]
-            self.current_plot.plot(xs, ys, pen=pg.mkPen(color='g', width=2), clear=False, name='Source current')
+            self.current_plot.plot(xs, ys, pen=pg.mkPen(color=(0, 150, 70), width=2), clear=False, name='Source current')
             self.current_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(0, 128, 0, 160))
         if sense_series:
             xs = [p[0] for p in sense_series]

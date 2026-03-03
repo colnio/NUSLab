@@ -1,9 +1,10 @@
 import sys
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 import pandas as pd
 import time 
 import datetime
@@ -67,19 +68,26 @@ class IVgRegime(QWidget):
     def initUI(self):
         
         self.setWindowTitle('Keithley IVg')
+        self.resize(1400, 900)
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         # keithley 
         device_sd_address_layout = QHBoxLayout()
         self.device_sd_address_input = QComboBox()
-        self.device_sd_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
         device_sd_address_layout.addWidget(QLabel('Source-Drain Device address:'))
         device_sd_address_layout.addWidget(self.device_sd_address_input)
+        device_sd_address_layout.addWidget(self.refresh_button)
+        device_sd_address_layout.addWidget(self.refresh_status_label)
         layout.addLayout(device_sd_address_layout)
         # keithley 
         device_gate_address_layout = QHBoxLayout()
         self.device_gate_address_input = QComboBox()
-        self.device_gate_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
         device_gate_address_layout.addWidget(QLabel('Gate Device address:'))
         device_gate_address_layout.addWidget(self.device_gate_address_input)
         layout.addLayout(device_gate_address_layout)
@@ -163,12 +171,21 @@ class IVgRegime(QWidget):
         # Start/Stop button
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
+
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.eta_label)
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -177,13 +194,79 @@ class IVgRegime(QWidget):
         # I(V) plot
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
-        self.iv_plot.showGrid(x=True, y=True)
+        self.iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.iv_plot.setLabel('left', 'Current', units='A')
+        self.iv_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.leakage_plot = self.plot_widget.addPlot(title="Gate (Leakage) I(V)")
-        self.leakage_plot.showGrid(x=True, y=True)
+        self.leakage_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.leakage_plot.setLabel('left', 'Current', units='A')
+        self.leakage_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.leakage_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.leakage_plot.getAxis('bottom').enableAutoSIPrefix(True)
         
         layout.addWidget(self.plot_widget)
 
         self.setLayout(layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+        self.gate_path = []
+        self.gate_path_index = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(
+                keithley,
+                [self.device_sd_address_input, self.device_gate_address_input],
+                include_mock=True,
+            )
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
+
+    def estimate_total_steps(self):
+        return max(1, len(self.gate_path))
+
+    def _segment_points(self, start, stop, step):
+        if np.isclose(start, stop, atol=1e-15):
+            return [float(start)]
+        n = int(np.ceil(abs(stop - start) / max(step, 1e-12)))
+        return [float(v) for v in np.linspace(start, stop, max(2, n + 1))]
+
+    def _append_segment(self, out, seg):
+        for v in seg:
+            if not out or not np.isclose(out[-1], v, atol=1e-12):
+                out.append(float(v))
+
+    def _build_gate_path(self):
+        step = float(self.voltage_step)
+        if step <= 0:
+            return [0.0]
+        path = []
+        self._append_segment(path, self._segment_points(0.0, self.voltage_min, step))
+        runs = max(1, int(self.n_runs))
+        current = self.voltage_min
+        for i in range(runs):
+            target = self.voltage_max if i % 2 == 0 else self.voltage_min
+            self._append_segment(path, self._segment_points(current, target, step))
+            current = target
+        if not np.isclose(current, self.voltage_min, atol=1e-12):
+            self._append_segment(path, self._segment_points(current, self.voltage_min, step))
+        self._append_segment(path, self._segment_points(self.voltage_min, 0.0, step))
+        return path if path else [0.0]
 
     def start_measurement(self):
         self.voltage_min = self.voltage_min_input.value()
@@ -222,7 +305,9 @@ class IVgRegime(QWidget):
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
-        self.current_voltage = 0
+        self.gate_path = self._build_gate_path()
+        self.gate_path_index = 0
+        self.current_voltage = float(self.gate_path[0])
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if type(self.device_gate) == keithley.Keithley6517B:
             self.device_gate.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
@@ -233,6 +318,9 @@ class IVgRegime(QWidget):
                 QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
                 return
             self.device_sd.set_current_range(current_range_val)
+        self.total_steps = self.estimate_total_steps()
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
@@ -306,28 +394,20 @@ class IVgRegime(QWidget):
 
         # Update plots
         self.update_plots()
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"Vg={self.current_voltage:.3f} V"
+        )
 
-        # Move to the next voltage step
-        self.current_voltage += self.voltage_step * self.direction
-
-        if self.current_voltage > self.voltage_max:
-            self.current_voltage = self.voltage_max
-            self.direction *= -1
-            self.n_runs -= 1
-
-        if self.current_voltage < self.voltage_min:
-            self.current_voltage = self.voltage_min
-            self.direction *= -1
-            self.n_runs -= 1
-
-        # if self.n_runs <= 0 and self.current_voltage == 0:
-        #     self.device.set_voltage(0)
-        #     self.stop_measurement()
-
-        if self.n_runs <= 0 and abs(self.current_voltage) <= self.voltage_step/10:
+        # Move to the next gate point in the smooth path:
+        # 0 -> Vmin -> Vmax -> Vmin -> 0
+        if self.gate_path_index >= len(self.gate_path) - 1:
             self.current_voltage = 0
-            # self.device_.set_voltage(0)
             self.stop_measurement()
+            return
+        self.gate_path_index += 1
+        self.current_voltage = float(self.gate_path[self.gate_path_index])
 
     def update_plots(self):
         # Get I(V) and abs(I(V)) data
@@ -339,15 +419,9 @@ class IVgRegime(QWidget):
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
 
-        self.iv_plot.setLabel('left', 'Current (A)')
-        self.iv_plot.setLabel('bottom', 'Gate Voltage (V)')
-
-
         # Update |I(V)| plot
         self.leakage_plot.plot(voltages, currents_leak, pen=pg.mkPen(color='r', width=2), clear=True)
         self.leakage_plot.plot(voltages, currents_leak, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.leakage_plot.setLabel('left', 'Current (A)')
-        self.leakage_plot.setLabel('bottom', 'Gate Voltage (V)')
 
     def export_to_csv(self):
 

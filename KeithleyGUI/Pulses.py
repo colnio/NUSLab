@@ -1,9 +1,10 @@
 import sys
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 import pandas as pd
 import time 
 import datetime
@@ -59,15 +60,23 @@ class PulsesRegime(QWidget):
     def initUI(self):
         
         self.setWindowTitle('Keithley 6517B IV')
+        self.resize(1400, 900)
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
         # self.device_address_input.addItems(['dev 1', 'dev 2'])
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
+        device_address_layout.addWidget(self.refresh_button)
+        device_address_layout.addWidget(self.refresh_status_label)
         layout.addLayout(device_address_layout)
         # sample name
         sample_name_layout = QHBoxLayout()
@@ -125,12 +134,21 @@ class PulsesRegime(QWidget):
         # Start/Stop button
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
+
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.eta_label)
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -140,19 +158,56 @@ class PulsesRegime(QWidget):
         pg.setConfigOption('background', 'w')
         # First row
         self.curr_set_plot = self.plot_widget.addPlot(title="Current Set")
+        self.curr_set_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.curr_set_plot.setLabel('left', 'Current', units='A')
+        self.curr_set_plot.setLabel('bottom', 'Iteration')
+        self.curr_set_plot.getAxis('left').enableAutoSIPrefix(True)
         self.curr_read_plot = self.plot_widget.addPlot(title="Current Read")
+        self.curr_read_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.curr_read_plot.setLabel('left', 'Current', units='A')
+        self.curr_read_plot.setLabel('bottom', 'Iteration')
+        self.curr_read_plot.getAxis('left').enableAutoSIPrefix(True)
 
         # Move to the next row
         self.plot_widget.nextRow()
 
         # Second row
         self.curr_reset_plot = self.plot_widget.addPlot(title="Current Reset")
+        self.curr_reset_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.curr_reset_plot.setLabel('left', 'Current', units='A')
+        self.curr_reset_plot.setLabel('bottom', 'Iteration')
+        self.curr_reset_plot.getAxis('left').enableAutoSIPrefix(True)
         self.curr_read_rest_plot = self.plot_widget.addPlot(title="Current Read Rest")
+        self.curr_read_rest_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.curr_read_rest_plot.setLabel('left', 'Current', units='A')
+        self.curr_read_rest_plot.setLabel('bottom', 'Iteration')
+        self.curr_read_rest_plot.getAxis('left').enableAutoSIPrefix(True)
 
         # Add the widget to the layout
         layout.addWidget(self.plot_widget)
 
         self.setLayout(layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(keithley, [self.device_address_input], include_mock=True)
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
 
     def start_measurement(self):
         self.v_set = self.voltage_set.value()
@@ -186,6 +241,9 @@ class PulsesRegime(QWidget):
             return
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.v_set), abs(self.v_reset)))
+        self.total_steps = max(1, int(self.n_runs))
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
         self.timer.start(100)  # Update every 100 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
 
@@ -228,6 +286,11 @@ class PulsesRegime(QWidget):
         # Update plots
         self.update_plots()
         self.n_runs -= 1
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"cycle={self.completed_steps}"
+        )
         # Move to the next voltage step
         if (self.i_set[-1] > self.compliance_current or self.i_read_set[-1] > self.compliance_current \
             or self.i_reset[-1] > self.compliance_current \
@@ -248,26 +311,18 @@ class PulsesRegime(QWidget):
         self.curr_set_plot.plot(g, self.i_set, pen=pg.mkPen(color='b', width=2), clear=True)
         self.curr_set_plot.plot(g, self.i_set, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
         
-        self.curr_set_plot.setLabel('left', 'Current (A)')
-        self.curr_set_plot.setLabel('bottom', 'Iteration (N)')
         # Update READ plot
         self.curr_read_plot.plot(g, self.i_read_set, pen=pg.mkPen(color='b', width=2), clear=True)
         self.curr_read_plot.plot(g, self.i_read_set, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
         
-        self.curr_read_plot.setLabel('left', 'Current (A)')
-        self.curr_read_plot.setLabel('bottom', 'Iteration (N)')
         # Update RESET plot
         self.curr_reset_plot.plot(g, self.i_reset, pen=pg.mkPen(color='b', width=2), clear=True)
         self.curr_reset_plot.plot(g, self.i_reset, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
         
-        self.curr_reset_plot.setLabel('left', 'Current (A)')
-        self.curr_reset_plot.setLabel('bottom', 'Iteration (N)')
         # Update READ RESET plot
         self.curr_read_rest_plot.plot(g, self.i_read_reset, pen=pg.mkPen(color='b', width=2), clear=True)
         self.curr_read_rest_plot.plot(g, self.i_read_reset, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
         
-        self.curr_read_rest_plot.setLabel('left', 'Current (A)')
-        self.curr_read_rest_plot.setLabel('bottom', 'Iteration (N)')
 
 
     def export_to_csv(self):

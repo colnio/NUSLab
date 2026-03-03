@@ -65,6 +65,38 @@ def _model_to_class_name(model_upper: str):
         return "Keithley2002"
     return None
 
+
+def _extract_resource_token(value: str):
+    """
+    Return the VISA resource token from a GUI string like:
+    "GPIB0::16::INSTR - 6430 - Keithley6430 - KEITHLEY,..."
+    """
+    if not value:
+        return ""
+    text = str(value).strip()
+    if " - " in text:
+        text = text.split(" - ", 1)[0].strip()
+    if " " in text and "::" in text:
+        text = text.split()[0]
+    return text
+
+
+def _query_idn(resource, timeout_ms=3000):
+    """
+    Query *IDN? without resetting the instrument state.
+    """
+    idn = ""
+    try:
+        resource.read_termination = '\n'
+        resource.write_termination = '\n'
+        resource.timeout = int(timeout_ms)
+        resource.write('*CLS')
+        resource.write('*IDN?')
+        idn = resource.read().strip()
+    except Exception:
+        idn = ""
+    return idn
+
 def get_devices_list():
     """
     Enumerate VISA resources, probe *IDN?, and return a list of (resource, model, class_name, idn_string).
@@ -80,18 +112,10 @@ def get_devices_list():
 
     for r in resources:
         idn = ""
+        res = None
         try:
             res = rm.open_resource(r)
-            # Be tolerant of termination settings
-            res.read_termination = '\n'
-            res.write_termination = '\n'
-            res.timeout = 3000
-            res.write('*CLS')
-            res.write('*RST')
-            # Some models need a moment after *RST
-            time.sleep(0.05)
-            res.write('*IDN?')
-            idn = res.read().strip()
+            idn = _query_idn(res, timeout_ms=3000)
         except Exception as E:
             # Could not query; skip silently but print for debug
             # print(f"IDN failed on {r}: {E}")
@@ -142,10 +166,12 @@ def get_device(gpib_address, nplc):
             return Keithley2002(res_str, nplc=nplc)
         return None
 
+    gpib_address = str(gpib_address).strip()
+    resource_hint = _extract_resource_token(gpib_address)
     rm = ResourceManager()
 
     # Case A: it's a VISA resource string; try to open and query *IDN?
-    looks_like_resource = "::" in gpib_address or gpib_address.upper().startswith(("USB", "GPIB", "TCPIP", "ASRL"))
+    looks_like_resource = "::" in resource_hint or resource_hint.upper().startswith(("USB", "GPIB", "TCPIP", "ASRL"))
 
     # Case B: it's a hint string with a model inside (e.g. "... 6517B" or just "2002")
     model_hint = None
@@ -157,15 +183,10 @@ def get_device(gpib_address, nplc):
     try:
         if looks_like_resource:
             # Prefer probing the resource to get an authoritative IDN
-            res_str = gpib_address.split()[0]  # in case they appended " 2002" etc.
+            res_str = resource_hint
             inst = rm.open_resource(res_str)
-            inst.read_termination = '\n'
-            inst.write_termination = '\n'
-            inst.timeout = 4000
             try:
-                inst.write('*CLS')
-                inst.write('*IDN?')
-                idn = inst.read().strip()
+                idn = _query_idn(inst, timeout_ms=4000)
             except Exception:
                 idn = ""
             finally:
@@ -196,11 +217,7 @@ def get_device(gpib_address, nplc):
                     for r in rm.list_resources():
                         try:
                             res = rm.open_resource(r)
-                            res.read_termination = '\n'
-                            res.write_termination = '\n'
-                            res.timeout = 2500
-                            res.write('*IDN?')
-                            idn = res.read().strip()
+                            idn = _query_idn(res, timeout_ms=2500)
                         except Exception:
                             idn = ""
                         finally:

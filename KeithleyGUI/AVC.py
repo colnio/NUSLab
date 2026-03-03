@@ -3,9 +3,10 @@ import matplotlib
 import matplotlib.pyplot
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox)
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 import pandas as pd
 import time 
 import datetime
@@ -53,14 +54,22 @@ class AVCRegime(QWidget):
     def initUI(self):
         
         self.setWindowTitle('Keithley 6517B IV')
+        self.resize(1400, 900)
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         # keithley 
         device_address_layout = QHBoxLayout()
         self.device_address_input = QComboBox()
-        self.device_address_input.addItems([' - '.join(i) for i in keithley.get_devices_list()] + ['Mock'])
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
         device_address_layout.addWidget(QLabel('Device address:'))
         device_address_layout.addWidget(self.device_address_input)
+        device_address_layout.addWidget(self.refresh_button)
+        device_address_layout.addWidget(self.refresh_status_label)
         layout.addLayout(device_address_layout)
         # sample name
         sample_name_layout = QHBoxLayout()
@@ -127,17 +136,26 @@ class AVCRegime(QWidget):
         # Start/Stop button
         button_layout = QHBoxLayout()
         self.start_button = QPushButton('Start Measurement')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.voltage_now = QLabel('0 V')
         self.voltage_now.setAlignment(Qt.AlignCenter)
         self.voltage_now.setStyleSheet("background-color: lightgray") 
         self.stop_button = QPushButton('Stop Measurement')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         button_layout.addWidget(self.start_button)
         # button_layout.addWidget(QLabel('Voltage now: '))
         button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
+
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.eta_label)
 
         # Plot area for I(V), abs(I(V)) and noise using PyQtGraph
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -146,9 +164,17 @@ class AVCRegime(QWidget):
         # I(V) plot
         pg.setConfigOption('background', 'w')
         self.iv_plot = self.plot_widget.addPlot(title="I(V)")
-        self.iv_plot.showGrid(x=True, y=True)
+        self.iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.iv_plot.setLabel('left', 'Voltage', units='V')
+        self.iv_plot.setLabel('bottom', 'Current', units='A')
+        self.iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.abs_iv_plot = self.plot_widget.addPlot(title="|I(V)|")
-        self.abs_iv_plot.showGrid(x=True, y=True)
+        self.abs_iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.abs_iv_plot.setLabel('left', '|Voltage|', units='V')
+        self.abs_iv_plot.setLabel('bottom', 'Current', units='A')
+        self.abs_iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.abs_iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
 
         # Enable logarithmic scale for abs(I(V))
         self.abs_iv_plot.setLogMode(False, True)  # Y-axis in log scale
@@ -161,10 +187,58 @@ class AVCRegime(QWidget):
         # I(t) plot
 
         self.time_plot = self.time_plot_widget.addPlot(title="I(t)")
-        self.time_plot.showGrid(x=True, y=True)
+        self.time_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.time_plot.setLabel('left', 'Voltage', units='V')
+        self.time_plot.setLabel('bottom', 'Time', units='s')
+        self.time_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.time_plot.getAxis('bottom').enableAutoSIPrefix(True)
 
         layout.addWidget(self.time_plot_widget)
         self.setLayout(layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(keithley, [self.device_address_input], include_mock=True)
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
+
+    def estimate_total_steps(self):
+        if self.current_step <= 0:
+            return 1
+        runs = int(self.n_runs)
+        direction = 1
+        current = 0.0
+        steps = 0
+        max_iter = 5_000_000
+        while steps < max_iter:
+            steps += 1
+            current += self.current_step * direction
+            if current > self.current_max:
+                current = self.current_max
+                direction *= -1
+                runs -= 1
+            if current < self.current_min:
+                current = self.current_min
+                direction *= -1
+                runs -= 1
+            if runs <= 0 and abs(current) <= self.current_step / 10 and self.current_step != 0:
+                break
+        return max(1, steps)
 
     def start_measurement(self):
         try:
@@ -213,6 +287,9 @@ class AVCRegime(QWidget):
         # if type(self.device) == keithley.Keithley6430:
         #     self.device.device.write(f":SENS:CURR:PROT {self.current_range_input.currentText()};")
         self.device.set_source_mode('current')
+        self.total_steps = self.estimate_total_steps()
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
         self.timer.start(50)  # Update every 50 ms
         self.elapsed_timer.start()  # Start the elapsed time for integration
         # Clear plots
@@ -267,6 +344,11 @@ class AVCRegime(QWidget):
         self.noise_data.append(noise_currents)
         # Update plots
         self.update_plots()
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"Iset={self.current_current:.3e} A"
+        )
         # Move to the next voltage step
         self.current_current += self.current_step * self.direction
 
@@ -295,21 +377,14 @@ class AVCRegime(QWidget):
         self.iv_plot.plot(voltages, currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.iv_plot.plot(voltages, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
 
-        self.iv_plot.setLabel('left', 'Current (A)')
-        self.iv_plot.setLabel('bottom', 'Voltage (V)')
-
         # Update |I(V)| plot
         self.abs_iv_plot.plot(voltages, abs_currents, pen=pg.mkPen(color='r', width=2), clear=True)
         self.abs_iv_plot.plot(voltages, abs_currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
-        self.abs_iv_plot.setLabel('left', '|Current| (A)')
-        self.abs_iv_plot.setLabel('bottom', 'Voltage (V)')
 
         # Update I(t) plot
         time_data = np.array([m[3] for m in self.measurements])
         self.time_plot.plot(time_data - time_data[0], currents, pen=pg.mkPen(color='b', width=2), clear=True)
         self.time_plot.plot(time_data - time_data[0], currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(0, 0, 255, 255), clear=False)
-        self.time_plot.setLabel('left', 'Current (A)')
-        self.time_plot.setLabel('bottom', 'Time (s)')
 
 
     def export_to_csv(self):

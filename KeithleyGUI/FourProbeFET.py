@@ -26,9 +26,11 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QCheckBox,
+    QProgressBar,
 )
 
 import keithley
+from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
 
 class FourProbeFET(QWidget):
     def __init__(self):
@@ -64,7 +66,10 @@ class FourProbeFET(QWidget):
 
     def init_ui(self):
         self.setWindowTitle('Keithley Four-Probe FET')
+        self.resize(1500, 920)
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         device_list = [' - '.join(entry) for entry in keithley.get_devices_list()]
         device_list.append('Mock')
@@ -75,6 +80,10 @@ class FourProbeFET(QWidget):
         self.sd_combo = QComboBox()
         self.sd_combo.addItems(device_list)
         self.sd_combo.setMaximumWidth(combo_width)
+        self.refresh_button = QPushButton('Refresh GPIB')
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_status_label = QLabel('Idle')
+        self.refresh_status_label.setStyleSheet("color: #64748b;")
 
         self.probe_combo = QComboBox()
         self.probe_combo.addItems(device_list)
@@ -142,6 +151,8 @@ class FourProbeFET(QWidget):
         control_grid.addWidget(self.probe_combo, row, 3)
         control_grid.addWidget(QLabel('Gate Src'), row, 4)
         control_grid.addWidget(self.gate_combo, row, 5)
+        control_grid.addWidget(self.refresh_button, row, 6)
+        control_grid.addWidget(self.refresh_status_label, row, 7)
 
         row += 1
         control_grid.addWidget(QLabel('Sample'), row, 0)
@@ -186,8 +197,10 @@ class FourProbeFET(QWidget):
 
         button_row = QHBoxLayout()
         self.start_button = QPushButton('Start')
+        self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop')
+        self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_measurement)
         self.stop_button.setEnabled(False)
         button_row.addWidget(self.start_button)
@@ -210,24 +223,83 @@ class FourProbeFET(QWidget):
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('w')
         self.iv_plot = self.plot_widget.addPlot(title='Ids vs Vg')
-        self.iv_plot.showGrid(x=True, y=True)
-        self.iv_plot.setLabel('left', 'Source-Drain Current (A)')
-        self.iv_plot.setLabel('bottom', 'Gate Voltage (V)')
+        self.iv_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.iv_plot.setLabel('left', 'Source-Drain current', units='A')
+        self.iv_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.iv_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.iv_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.probe_plot = self.plot_widget.addPlot(title='Probe Voltage vs Vg')
-        self.probe_plot.showGrid(x=True, y=True)
-        self.probe_plot.setLabel('left', 'Probe Voltage (V)')
-        self.probe_plot.setLabel('bottom', 'Gate Voltage (V)')
+        self.probe_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.probe_plot.setLabel('left', 'Probe voltage', units='V')
+        self.probe_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.probe_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.probe_plot.getAxis('bottom').enableAutoSIPrefix(True)
         self.plot_widget.nextRow()
         self.gate_plot = self.plot_widget.addPlot(title='Gate Leakage vs Gate Voltage')
-        self.gate_plot.showGrid(x=True, y=True)
-        self.gate_plot.setLabel('left', 'Gate Leakage Current (A)')
-        self.gate_plot.setLabel('bottom', 'Gate Voltage (V)')
+        self.gate_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.gate_plot.setLabel('left', 'Gate leakage current', units='A')
+        self.gate_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.gate_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.gate_plot.getAxis('bottom').enableAutoSIPrefix(True)
         layout.addWidget(self.plot_widget)
 
         self.status_label = QLabel('')
         layout.addWidget(self.status_label)
+        self.progress_bar = QProgressBar()
+        self.progress_label = QLabel('Progress: 0/0')
+        self.eta_label = QLabel('ETA: --')
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.eta_label)
 
         self.setLayout(layout)
+        apply_standard_window_style(self)
+        self.refresh_devices()
+        self.progress_tracker = ProgressEta(self.progress_bar, self.eta_label, self.progress_label)
+        self.total_steps = 0
+        self.completed_steps = 0
+
+    def refresh_devices(self):
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText('Refreshing...')
+        self.refresh_status_label.setText('Scanning GPIB...')
+        QApplication.processEvents()
+        try:
+            devices = refresh_device_combos(
+                keithley,
+                [self.sd_combo, self.probe_combo, self.gate_combo],
+                include_mock=True,
+            )
+            count = max(0, len(devices) - (1 if 'Mock' in devices else 0))
+            self.refresh_status_label.setText(f'Found {count} device(s)')
+        except Exception as exc:
+            self.refresh_status_label.setText(f'Refresh failed: {exc}')
+            raise
+        finally:
+            self.refresh_button.setText('Refresh GPIB')
+            self.refresh_button.setEnabled(True)
+
+    def estimate_total_steps(self):
+        if not self.gate_values:
+            return 1
+        idx = 0
+        direction = 1
+        runs = int(self.gate_remaining_runs)
+        steps = 0
+        max_iter = 5_000_000
+        while steps < max_iter:
+            steps += 1
+            next_index = idx + direction
+            if next_index >= len(self.gate_values) or next_index < 0:
+                direction *= -1
+                runs -= 1
+                if runs <= 0:
+                    break
+                next_index = idx + direction
+                if next_index >= len(self.gate_values) or next_index < 0:
+                    break
+            idx = next_index
+        return max(1, steps)
 
     def _eval_numeric_field(self, widget, field_name):
         text = widget.text().strip()
@@ -278,6 +350,31 @@ class FourProbeFET(QWidget):
         if abs(values[-1] - vmax) > eps:
             values.append(vmax)
         return values
+
+    def _segment_points(self, start, stop, step):
+        if np.isclose(start, stop, atol=1e-15):
+            return [float(start)]
+        n = int(np.ceil(abs(stop - start) / max(step, 1e-12)))
+        return [float(v) for v in np.linspace(start, stop, max(2, n + 1))]
+
+    def _append_segment(self, out, seg):
+        for v in seg:
+            if not out or not np.isclose(out[-1], v, atol=1e-12):
+                out.append(float(v))
+
+    def _build_gate_path(self, vmin, vmax, step, runs):
+        path = []
+        self._append_segment(path, self._segment_points(0.0, vmin, step))
+        runs = max(1, int(runs))
+        current = vmin
+        for i in range(runs):
+            target = vmax if i % 2 == 0 else vmin
+            self._append_segment(path, self._segment_points(current, target, step))
+            current = target
+        if not np.isclose(current, vmin, atol=1e-12):
+            self._append_segment(path, self._segment_points(current, vmin, step))
+        self._append_segment(path, self._segment_points(vmin, 0.0, step))
+        return path if path else [0.0]
 
     def start_measurement(self):
         if self.timer.isActive():
@@ -369,7 +466,12 @@ class FourProbeFET(QWidget):
 
         self.measurements = []
         try:
-            self.gate_values = self._build_sweep(gate_min, gate_max, gate_step)
+            self.gate_values = self._build_gate_path(
+                gate_min,
+                gate_max,
+                gate_step,
+                self.nruns_input.value(),
+            )
         except ValueError as exc:
             QMessageBox.critical(self, "Error", str(exc))
             self.cleanup_devices()
@@ -404,6 +506,9 @@ class FourProbeFET(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.status_label.setText('Measurement running...')
+        self.total_steps = self.estimate_total_steps()
+        self.completed_steps = 0
+        self.progress_tracker.start(self.total_steps)
 
     def cleanup_devices(self):
         if self.sd_adapter:
@@ -486,19 +591,18 @@ class FourProbeFET(QWidget):
         self.status_label.setText(f'Gate target {fmt(self.current_gate_target)} V | Vsd set {fmt(self.sd_voltage_setpoint)} V')
 
         self.update_plots()
+        self.completed_steps += 1
+        self.progress_tracker.step(
+            self.completed_steps,
+            extra_text=f"Vg={self.current_gate_target:.3f} V",
+        )
         if not self._advance_gate():
             self.stop_measurement(save=True)
 
     def _advance_gate(self):
-        next_index = self.current_gate_index + self.gate_direction
-        if next_index >= len(self.gate_values) or next_index < 0:
-            self.gate_direction *= -1
-            self.gate_remaining_runs -= 1
-            if self.gate_remaining_runs <= 0:
-                return False
-            next_index = self.current_gate_index + self.gate_direction
-            if next_index >= len(self.gate_values) or next_index < 0:
-                return False
+        next_index = self.current_gate_index + 1
+        if next_index >= len(self.gate_values):
+            return False
         self.current_gate_index = next_index
         self.current_gate_target = self.gate_values[self.current_gate_index]
         try:
