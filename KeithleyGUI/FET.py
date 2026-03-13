@@ -4,7 +4,12 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
-from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
+from ui_helpers import (
+    ProgressEta,
+    refresh_device_combos,
+    apply_standard_window_style,
+    parse_numeric_text,
+)
 import pandas as pd
 import time 
 import datetime
@@ -35,6 +40,8 @@ class IVgRegime(QWidget):
 
         # Initialize simulation variables
         self.device = None
+        self.device_gate = None
+        self.device_sd = None
         self.sample_name = ''
         # self.device = keithley.Keithley6517B('GPIB0::27::INSTR')
         self.device_address = ''
@@ -269,12 +276,14 @@ class IVgRegime(QWidget):
         return path if path else [0.0]
 
     def start_measurement(self):
+        if self.timer.isActive():
+            return
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
         self.voltage_sd = self.voltage_sd_input.value()
         try:
-            self.compliance_current = eval(self.compliance_input.text())
+            self.compliance_current = parse_numeric_text(self.compliance_input.text(), "Compliance current")
         except:
             QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
             return
@@ -313,7 +322,7 @@ class IVgRegime(QWidget):
             self.device_gate.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             try:
-                current_range_val = float(eval(self.current_range))
+                current_range_val = parse_numeric_text(self.current_range, "Current range")
             except Exception:
                 QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
                 return
@@ -329,7 +338,7 @@ class IVgRegime(QWidget):
         self.leakage_plot.clear()
         self.direction = 1
 
-    def stop_measurement(self):
+    def stop_measurement(self, save=True, close_devices=True):
         # if reset_voltage:
         self.current_voltage = 0
         if self.device_gate:
@@ -338,15 +347,22 @@ class IVgRegime(QWidget):
                 self.device_gate.disable_output()
             except Exception:
                 pass
+            if close_devices:
+                keithley.shutdown_device(self.device_gate, close=True)
+                self.device_gate = None
         if self.device_sd:
             try:
                 self.device_sd.set_voltage(0)
                 self.device_sd.disable_output()
             except Exception:
                 pass
+            if close_devices:
+                keithley.shutdown_device(self.device_sd, close=True)
+                self.device_sd = None
         self.timer.stop()
-        self.make_plot()
-        self.export_to_csv()
+        if save and self.measurements:
+            self.make_plot()
+            self.export_to_csv()
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
@@ -473,7 +489,12 @@ class IVgRegime(QWidget):
         plt.savefig(op.join(sample_dir, 'plots', f'LeakVg_{name}_{self.start_time}.png'), dpi=300)
         plt.close('all')
         gc.collect()
-    
+
+    def closeEvent(self, event):
+        try:
+            self.stop_measurement(save=False, close_devices=True)
+        finally:
+            super().closeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

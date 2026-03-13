@@ -10,7 +10,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
-from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
+from ui_helpers import (
+    ProgressEta,
+    refresh_device_combos,
+    apply_standard_window_style,
+    parse_numeric_text,
+)
 import pandas as pd
 import time
 import datetime
@@ -293,11 +298,13 @@ class VACRegime(QWidget):
 
     # ===================== Measurement lifecycle =====================
     def start_measurement(self):
+        if self.timer.isActive():
+            return
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
         try:
-            self.compliance_current = float(eval(self.compliance_input.text()))
+            self.compliance_current = parse_numeric_text(self.compliance_input.text(), "Compliance current")
         except Exception:
             QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
             return
@@ -316,17 +323,16 @@ class VACRegime(QWidget):
         self.noise_data = []
         self.current_voltage = 0
         self.prev_voltage = 0.1
-        self.device.set_voltage(self.current_voltage)
-        # time.sleep(5)
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if self.device == None:
             QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
             return
+        self.device.set_voltage(self.current_voltage)
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             try:
-                self.device.set_current_range(float(eval(self.current_range)))
+                self.device.set_current_range(parse_numeric_text(self.current_range, "Current range"))
             except Exception:
                 QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
                 return
@@ -345,7 +351,7 @@ class VACRegime(QWidget):
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
 
-    def stop_measurement(self):
+    def stop_measurement(self, save=True, close_device=True):
         if self.device:
             try:
                 self.device.set_voltage(0)
@@ -355,11 +361,15 @@ class VACRegime(QWidget):
                 self.device.disable_output()
             except Exception:
                 pass
+            if close_device:
+                keithley.shutdown_device(self.device, close=True)
+                self.device = None
         self.voltage_now.setText('0 V')
         self.voltage_now.adjustSize()
         self.timer.stop()
-        self.make_plot()
-        self.export_to_csv()
+        if save and self.measurements:
+            self.make_plot()
+            self.export_to_csv()
         self.direction = 1
 
     def perform_measurement(self):
@@ -511,6 +521,12 @@ class VACRegime(QWidget):
         plt.close('all')
         gc.collect()
         # matplotlib.pyplot.clf()
+
+    def closeEvent(self, event):
+        try:
+            self.stop_measurement(save=False, close_device=True)
+        finally:
+            super().closeEvent(event)
 
 
 if __name__ == '__main__':

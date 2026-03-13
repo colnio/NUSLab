@@ -1,5 +1,7 @@
 import time
 from typing import Iterable, List, Optional
+import ast
+import operator
 
 
 def build_device_display_list(keithley_module, include_mock: bool = True) -> List[str]:
@@ -121,3 +123,48 @@ def apply_standard_window_style(widget):
         }
         QProgressBar::chunk { background-color: #16a34a; }
     """)
+
+
+_ALLOWED_BIN_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+}
+_ALLOWED_UNARY_OPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _eval_numeric_expr(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARY_OPS:
+        return _ALLOWED_UNARY_OPS[type(node.op)](_eval_numeric_expr(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BIN_OPS:
+        left = _eval_numeric_expr(node.left)
+        right = _eval_numeric_expr(node.right)
+        return _ALLOWED_BIN_OPS[type(node.op)](left, right)
+    raise ValueError("Unsupported expression")
+
+
+def parse_numeric_text(text: str, field_name: str) -> float:
+    """
+    Parse a user-entered numeric value safely.
+    Supports plain floats and simple arithmetic expressions like '1e-3' or '1/3'.
+    """
+    raw = str(text).strip()
+    if not raw:
+        raise ValueError(f"{field_name} is empty.")
+    try:
+        return float(raw)
+    except Exception:
+        pass
+
+    try:
+        expr = ast.parse(raw, mode="eval")
+        return float(_eval_numeric_expr(expr.body))
+    except Exception as exc:
+        raise ValueError(f"{field_name} is invalid: {raw}") from exc

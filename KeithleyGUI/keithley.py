@@ -3,6 +3,16 @@ import time
 import numpy as np
 from pyvisa import ResourceManager
 
+
+def _first_float_from_csv(raw: str, fallback=np.nan):
+    for token in str(raw).strip().split(','):
+        try:
+            return float(token)
+        except Exception:
+            continue
+    return fallback
+
+
 def find_range(current):
     ranges = 2 * 10.0**np.arange(-12.0, 1, 1.0)
     idx = np.where(ranges > current)[0]
@@ -24,6 +34,34 @@ def auto_range(device, p1=None, compl=1):
             device.set_current_range(find_range(abs(p1) * 3))
         c = device.read_current()
     return c if abs(c) < 200e-3 else device.read_current(autorange=True)
+
+
+def shutdown_device(device, close=False):
+    """
+    Best-effort safe shutdown for any instrument wrapper used in this project.
+    """
+    if device is None:
+        return
+    for setter in ("set_voltage", "set_current"):
+        fn = getattr(device, setter, None)
+        if callable(fn):
+            try:
+                fn(0)
+            except Exception:
+                pass
+    disable = getattr(device, "disable_output", None)
+    if callable(disable):
+        try:
+            disable()
+        except Exception:
+            pass
+    if close:
+        closer = getattr(device, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
 def _parse_idn(idn_raw: str):
     """
@@ -279,7 +317,7 @@ class Keithley6517B:
     
     def get_current_range(self):
         self.device.write('CURR:RANG?;')
-        return eval(self.device.read())
+        return _first_float_from_csv(self.device.read())
 
     def set_voltage(self, voltage_value):
         """
@@ -346,22 +384,50 @@ class Keithley6430:
     def init_device(self, nplc):
         self.device.write('*CLS;')
         self.device.write('*RST;')
+        self.device.write(":SOUR:FUNC VOLT;")
+        self.device.write(":SOUR:VOLT:MODE FIX;")
+        self.device.write(":SOUR:VOLT:LEV 0;")
         self.device.write(":SENS:FUNC 'CURR';")
         self.device.write(f":SENS:CURR:NPLC {nplc};")
-        self.device.write(f":SOUR:VOLT:MODE FIX;")
         # self.device.write(f":SENS:CURR:PROT 105e-3;")
+        self.source_mode = 'voltage'
         self.output_enabled = False
+
     def set_complicance_current(self, curr):
-        # self.__init__(self.gpib_address, self.nplc)
-        self.device.write(f"*RST;")
-        # self.device.write(f":SENS:CURR:PROT:STAT ON")
-        self.device.write(f':SENS:CURR:RANG:AUTO ON;')
-        self.device.write(f":SENS:CURR:PROT {curr}")
-        self.device.write(f':SENS:CURR:RANG {curr};')
-        self.read_current(autorange=True)
+        curr = min(max(abs(float(curr)), 1e-12), 105e-3)
+        self.device.write(f":SENS:CURR:PROT {curr};")
+        self.device.write(f":SENS:CURR:RANG {curr};")
+
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
         self.device.write('*CLS')
+
+    def set_source_mode(self, mode='voltage'):
+        mode = str(mode).strip().lower()
+        if mode == 'current':
+            self.device.write(":SOUR:FUNC CURR;")
+            self.device.write(":SOUR:CURR:MODE FIX;")
+            self.device.write(":SENS:FUNC 'VOLT';")
+            self.device.write(f":SENS:VOLT:NPLC {self.nplc};")
+            self.device.write(":FORM:ELEM VOLT,CURR;")
+            self.device.write(":SOUR:CURR:LEV 0;")
+            self.source_mode = 'current'
+            return
+        self.device.write(":SOUR:FUNC VOLT;")
+        self.device.write(":SOUR:VOLT:MODE FIX;")
+        self.device.write(":SENS:FUNC 'CURR';")
+        self.device.write(f":SENS:CURR:NPLC {self.nplc};")
+        self.device.write(":FORM:ELEM VOLT,CURR;")
+        self.device.write(":SOUR:VOLT:LEV 0;")
+        self.source_mode = 'voltage'
+
+    def set_current(self, current_value):
+        if getattr(self, "source_mode", "voltage") != 'current':
+            self.set_source_mode('current')
+        self.device.write(f'SOUR:CURR:LEV {current_value};')
+        if not self.output_enabled:
+            self.device.write('OUTP ON')
+            self.output_enabled = True
 
     def set_voltage_range(self, range_value):
         """
@@ -382,13 +448,15 @@ class Keithley6430:
     
     def get_current_range(self):
         self.device.write('CURR:RANG?;')
-        return eval(self.device.read())
+        return _first_float_from_csv(self.device.read())
 
     def set_voltage(self, voltage_value):
         """
         Set the output voltage.
         :param voltage_value: Voltage to set (in volts).
         """
+        if getattr(self, "source_mode", "voltage") != 'voltage':
+            self.set_source_mode('voltage')
         self.device.write(f'SOUR:VOLT:LEV {voltage_value};')
         if not self.output_enabled:
             self.device.write('OUTP ON')  # Turn the output on
@@ -407,12 +475,33 @@ class Keithley6430:
         Read the current from the input.
         :return: The measured current (in amps).
         """
+        if autorange and getattr(self, "source_mode", "voltage") != 'current':
+            self.device.write(':MEAS:CURR?;')
+            value = _first_float_from_csv(self.device.read())
+            if np.isfinite(value) and abs(value) < 9.9e37:
+                return value
+        self.device.write(':READ?;')
+        values = []
+        for token in self.device.read().split(','):
+            try:
+                values.append(float(token))
+            except Exception:
+                pass
+        if len(values) >= 2:
+            # READ? commonly returns V,I,... for source-voltage mode.
+            return values[1]
+        if values:
+            return values[0]
+        return np.nan
+
+    def read_voltage(self, autorange=False):
         if autorange:
-            self.device.write(':MEAS?;')
-        else:
-            self.device.write(':READ?;')
-        current_value = self.device.read().split(',')[1]
-        return float(current_value)
+            self.device.write(':MEAS:VOLT?;')
+            value = _first_float_from_csv(self.device.read())
+            if np.isfinite(value) and abs(value) < 9.9e37:
+                return value
+        self.device.write(':READ?;')
+        return _first_float_from_csv(self.device.read())
 
     def continuous_current_read(self, delay=1):
         """
@@ -455,6 +544,7 @@ class Keithley6517B_Mock:
 
     def init_device(self, nplc):
         print(f"Initializing mock device with NPLC={nplc}")
+        self.source_mode = 'voltage'
         self.output_enabled = False
 
     def clear_buffer(self):
@@ -484,7 +574,18 @@ class Keithley6517B_Mock:
         """
         self.voltage_level = voltage_value
         self.output_enabled = True
+        self.source_mode = 'voltage'
         print(f"Mock voltage set to {voltage_value} V and output enabled")
+
+    def set_source_mode(self, mode='voltage'):
+        self.source_mode = str(mode).strip().lower()
+        print(f"Mock source mode set to {self.source_mode}")
+
+    def set_current(self, current_value):
+        self.current_level = current_value
+        self.source_mode = 'current'
+        self.output_enabled = True
+        print(f"Mock current set to {current_value} A and output enabled")
 
     def disable_output(self):
         """
@@ -499,6 +600,8 @@ class Keithley6517B_Mock:
         :return: The simulated current (in amps).
         """
         if self.output_enabled:
+            if self.source_mode == 'current':
+                return float(self.current_level)
             V = self.voltage_level
             # Diode I(V) characteristic (Shockley equation)
             I = self.I_s * (np.exp(V / (self.n * self.V_T)) - 1)
@@ -509,6 +612,12 @@ class Keithley6517B_Mock:
         else:
             print("Output is disabled, returning 0 A")
             return 0.0
+
+    def read_voltage(self, autorange=False):
+        if self.output_enabled and self.source_mode == 'current':
+            # simple synthetic load model for current-source mode
+            return float(self.current_level) * 1e6
+        return float(self.voltage_level)
     
     def get_current_range(self):
         # self.device.write('CURR:RANG?;')
@@ -1067,6 +1176,14 @@ class CurrentSourceAdapter:
         self.output_enabled = False
         self.last_set_current = 0.0
 
+    def close(self):
+        self.disable()
+        if hasattr(self.device, 'close'):
+            try:
+                self.device.close()
+            except Exception:
+                pass
+
 
 class VoltageMeterAdapter:
     """
@@ -1402,3 +1519,11 @@ class VoltageSourceAdapter:
             except Exception:
                 pass
         self.output_enabled = False
+
+    def close(self):
+        self.disable()
+        if hasattr(self.device, 'close'):
+            try:
+                self.device.close()
+            except Exception:
+                pass

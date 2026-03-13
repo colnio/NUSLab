@@ -6,7 +6,12 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer, Qt
 import keithley
-from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
+from ui_helpers import (
+    ProgressEta,
+    refresh_device_combos,
+    apply_standard_window_style,
+    parse_numeric_text,
+)
 import pandas as pd
 import time 
 import datetime
@@ -241,19 +246,21 @@ class AVCRegime(QWidget):
         return max(1, steps)
 
     def start_measurement(self):
+        if self.timer.isActive():
+            return
         try:
-            self.current_min = eval(self.current_min_input.text())
+            self.current_min = parse_numeric_text(self.current_min_input.text(), "Current min")
         except Exception as e:
             QMessageBox.critical(None, "Error", f"current_min is incorrect : {self.current_min_input.text()}")
             print(e)
             return
         try:
-            self.current_max = eval(self.current_max_input.text())
+            self.current_max = parse_numeric_text(self.current_max_input.text(), "Current max")
         except:
             QMessageBox.critical(None, "Error", f"current_max is incorrect : {self.current_max_input.text()}")
             return
         try:
-            self.current_step = eval(self.current_step_input.text())
+            self.current_step = parse_numeric_text(self.current_step_input.text(), "Current step")
         except:
             QMessageBox.critical(None, "Error", f"current_step is incorrect : {self.current_step_input.text()}")
             return
@@ -296,14 +303,25 @@ class AVCRegime(QWidget):
         self.iv_plot.clear()
         self.abs_iv_plot.clear()
 
-    def stop_measurement(self):
+    def stop_measurement(self, save=True, close_device=False):
         self.current_current = 0
-        self.device.set_current(0)
+        if self.device is not None:
+            try:
+                self.device.set_current(0)
+            except Exception:
+                pass
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+            if close_device:
+                keithley.shutdown_device(self.device, close=True)
+                self.device = None
         self.voltage_now.setText('0 V')
-        self.device.disable_output()
         self.timer.stop()
-        self.make_plot()
-        self.export_to_csv()
+        if save and self.measurements:
+            self.make_plot()
+            self.export_to_csv()
         self.direction = 1
 
     def perform_measurement(self):
@@ -364,7 +382,7 @@ class AVCRegime(QWidget):
 
         if self.n_runs <= 0 and abs(self.current_current) <= self.current_step/10 and self.current_step != 0:
             self.current_current = 0
-            self.device.set_voltage(0)
+            self.device.set_current(0)
             self.stop_measurement()
 
     def update_plots(self):
@@ -444,7 +462,12 @@ class AVCRegime(QWidget):
         plt.close('all')
         gc.collect()
         # matplotlib.pyplot.clf()
-    
+
+    def closeEvent(self, event):
+        try:
+            self.stop_measurement(save=False, close_device=True)
+        finally:
+            super().closeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

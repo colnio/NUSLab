@@ -4,7 +4,12 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFileDialog, QComboBox, QLineEdit, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QTimer, QElapsedTimer
 import keithley
-from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
+from ui_helpers import (
+    ProgressEta,
+    refresh_device_combos,
+    apply_standard_window_style,
+    parse_numeric_text,
+)
 import pandas as pd
 import time 
 import datetime
@@ -210,12 +215,14 @@ class PulsesRegime(QWidget):
             self.refresh_button.setEnabled(True)
 
     def start_measurement(self):
+        if self.timer.isActive():
+            return
         self.v_set = self.voltage_set.value()
         self.v_read_set = self.voltage_read_set.value()
         self.v_reset = self.voltage_reset.value()
         self.v_read_reset = self.voltage_read_reset.value()
         try:
-            self.compliance_current = eval(self.compliance_input.text())
+            self.compliance_current = parse_numeric_text(self.compliance_input.text(), "Compliance current")
         except:
             QMessageBox.critical(None, "Error", f"Compliance current is incorrect : {self.compliance_input.text()}")
             return
@@ -254,13 +261,24 @@ class PulsesRegime(QWidget):
         self.curr_read_rest_plot.clear()
         # self.noise_plot.clear()
 
-    def stop_measurement(self):
+    def stop_measurement(self, save=True, close_device=True):
         self.current_voltage = 0
-        self.device.set_voltage(0)
-        self.device.disable_output()
+        if self.device is not None:
+            try:
+                self.device.set_voltage(0)
+            except Exception:
+                pass
+            try:
+                self.device.disable_output()
+            except Exception:
+                pass
+            if close_device:
+                keithley.shutdown_device(self.device, close=True)
+                self.device = None
         self.timer.stop()
-        self.make_plot()
-        self.export_to_csv()
+        if save and self.i_set:
+            self.make_plot()
+            self.export_to_csv()
 
     def perform_measurement(self):
         # SET
@@ -365,7 +383,12 @@ class PulsesRegime(QWidget):
         plt.savefig(op.join(sample_dir, 'plots', f'PULSES_{name}_{self.start_time}.png'), dpi=300)
         plt.close('all')
         gc.collect()
-    
+
+    def closeEvent(self, event):
+        try:
+            self.stop_measurement(save=False, close_device=True)
+        finally:
+            super().closeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

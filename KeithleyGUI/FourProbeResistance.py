@@ -35,7 +35,12 @@ from PyQt5.QtWidgets import (
 )
 
 import keithley
-from ui_helpers import ProgressEta, refresh_device_combos, apply_standard_window_style
+from ui_helpers import (
+    ProgressEta,
+    refresh_device_combos,
+    apply_standard_window_style,
+    parse_numeric_text,
+)
 
 class FourProbeResistance(QWidget):
     def __init__(self):
@@ -266,7 +271,7 @@ class FourProbeResistance(QWidget):
         if selected == 'Auto-range':
             return None
         try:
-            return float(eval(selected))
+            return parse_numeric_text(selected, "Current range")
         except Exception:
             try:
                 return float(selected)
@@ -278,7 +283,7 @@ class FourProbeResistance(QWidget):
         if selected == 'Auto-range':
             return None
         try:
-            return float(eval(selected))
+            return parse_numeric_text(selected, "Voltage range")
         except Exception:
             try:
                 return float(selected)
@@ -289,16 +294,8 @@ class FourProbeResistance(QWidget):
         text = widget.text().strip()
         if not text:
             raise ValueError(f"{field_name} is required.")
-        if not self._eval_warning_shown:
-            QMessageBox.warning(
-                self,
-                "Warning",
-                "Current fields accept Python-style expressions (evaluated with eval). "
-                "Only enter trusted values.",
-            )
-            self._eval_warning_shown = True
         try:
-            value = float(eval(text, {"__builtins__": {}}, {}))
+            value = parse_numeric_text(text, field_name)
         except Exception as exc:
             raise ValueError(f"Could not evaluate {field_name}: {text}") from exc
         return value
