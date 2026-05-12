@@ -9,6 +9,9 @@ from ui_helpers import (
     refresh_device_combos,
     apply_standard_window_style,
     parse_numeric_text,
+    ensure_directory,
+    build_device_metadata,
+    write_json_file,
 )
 import pandas as pd
 import time 
@@ -58,6 +61,7 @@ class FETMAPRegime(QWidget):
         self.sd_direction = 1
         self.gate_direction = 1
         self.gate_settle_until = 0
+        self.measurement_metadata = {}
         # Setup GUI components
         self.initUI()
         self.sd_direction = 1
@@ -77,6 +81,51 @@ class FETMAPRegime(QWidget):
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
+
+    def _get_sample_name(self):
+        self.sample_name = self.sample_name_input.text().strip() or self.sample_name.strip() or 'sample'
+        return self.sample_name
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'FETMAP',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self.sample_name,
+            'devices': {
+                'gate': build_device_metadata(keithley, self.device_gate_address, self.device_gate),
+                'source_drain': build_device_metadata(keithley, self.device_sd_address, self.device_sd),
+            },
+            'parameters': {
+                'gate_voltage_min_v': self.voltage_min,
+                'gate_voltage_max_v': self.voltage_max,
+                'gate_voltage_step_v': self.voltage_step,
+                'source_drain_voltage_min_v': self.voltage_sd_min,
+                'source_drain_voltage_max_v': self.voltage_sd_max,
+                'source_drain_voltage_step_v': self.voltage_sd_step,
+                'compliance_current_a': self.compliance_current,
+                'collection_time_ms': self.collection_time,
+                'settle_time_ms': self.settle_time_ms,
+                'nplc': self.nplc,
+                'current_range_setting': self.current_range,
+                'n_runs_requested': self.n_runs,
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
 
     def initUI(self):
         
@@ -214,7 +263,7 @@ class FETMAPRegime(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         self.voltage_now = QLabel('0 V')
         self.voltage_now.setAlignment(Qt.AlignCenter)
         self.voltage_now.setStyleSheet("background-color: lightgray")
@@ -344,6 +393,7 @@ class FETMAPRegime(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
@@ -426,6 +476,7 @@ class FETMAPRegime(QWidget):
         self.device_sd.set_voltage(self.current_voltage_sd)
         self.gate_settle_until = self.elapsed_timer.elapsed() + self.settle_time_ms
         self.total_steps = self.estimate_total_steps()
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
 
@@ -454,11 +505,17 @@ class FETMAPRegime(QWidget):
         self.voltage_now.adjustSize()
         self.timer.stop()
         if save and self.measurements:
+            save_errors = []
             try:
-                self.make_plot()
                 self.export_to_csv()
             except Exception as exc:
-                QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
+                save_errors.append(f"Failed to save data:\n{exc}")
+            try:
+                self.make_plot()
+            except Exception as exc:
+                save_errors.append(f"Failed to save plots:\n{exc}")
+            if save_errors:
+                QMessageBox.critical(self, "Save Error", "\n\n".join(save_errors))
 
     def perform_measurement(self):
         if self.device_sd is None or self.device_gate is None:
@@ -585,15 +642,26 @@ class FETMAPRegime(QWidget):
         self.i_plot.plot(voltage_sd, currents, pen=None, symbol='o', symbolPen=None, symbolSize=5, symbolBrush=(255, 0, 0, 255), clear=False)
 
     def export_to_csv(self):
-
-        sample_dir = op.join(self.folder, self.date, self.sample_name)
-        if not op.exists(sample_dir):
-            os.makedirs(sample_dir)
-        if not op.exists(op.join(sample_dir, 'data')):
-            os.makedirs(op.join(sample_dir, 'data'))
-        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.voltage_sd_min}V_{self.voltage_sd_max}V_{self.collection_time}ms'
+        sample_name, _, data_dir = self._get_output_directories('data')
+        name = f'{sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.voltage_sd_min}V_{self.voltage_sd_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'FETMAP_{name}_{self.start_time}.data'), index=False)
+        output_path = op.join(data_dir, f'FETMAP_{name}_{self.start_time}.data')
+        df.to_csv(output_path, index=False)
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.measurements),
+            'data_columns': list(df.columns),
+            'data_file': output_path,
+            'metadata_file': op.join(data_dir, f'FETMAP_{name}_{self.start_time}.meta.json'),
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'remaining_runs_counter': self.n_runs,
+        })
+        write_json_file(metadata['metadata_file'], metadata)
 
 
     def get_pandas_data(self):

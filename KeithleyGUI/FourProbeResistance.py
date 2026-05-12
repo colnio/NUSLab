@@ -40,6 +40,9 @@ from ui_helpers import (
     refresh_device_combos,
     apply_standard_window_style,
     parse_numeric_text,
+    ensure_directory,
+    build_device_metadata,
+    write_json_file,
 )
 
 class FourProbeResistance(QWidget):
@@ -54,6 +57,7 @@ class FourProbeResistance(QWidget):
         self.remaining_runs = 0
         self.current_target = 0.0
         self._eval_warning_shown = False
+        self.measurement_metadata = {}
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.perform_measurement)
@@ -68,6 +72,52 @@ class FourProbeResistance(QWidget):
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
         self.init_ui()
+
+    def _get_sample_name(self):
+        return self.sample_name_input.text().strip() or 'sample'
+
+    def _get_contact_label(self):
+        return self.contact_label_input.text().strip() or 'contacts'
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'FourProbeResistance',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self._get_sample_name(),
+            'contact_label_at_start': self._get_contact_label(),
+            'devices': {
+                'current_source': build_device_metadata(keithley, self.source_combo.currentText(), self.source_device),
+                'voltmeter': build_device_metadata(keithley, self.voltmeter_combo.currentText(), self.voltage_device),
+            },
+            'parameters': {
+                'current_min_a': self.current_min,
+                'current_max_a': self.current_max,
+                'current_step_a': self.current_step,
+                'collection_time_ms': self.collection_time,
+                'nplc': self.nplc_combo.currentText(),
+                'current_range_setting': self.current_range_combo.currentText(),
+                'voltage_range_setting': self.voltage_range_combo.currentText(),
+                'compliance_voltage_v': self.compliance_input.value(),
+                'n_runs_requested': self.nruns_input.value(),
+                'average_over_interval': self.average_checkbox.isChecked(),
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
 
     def init_ui(self):
         self.setWindowTitle('Keithley Four-Probe Resistance')
@@ -172,7 +222,7 @@ class FourProbeResistance(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         self.stop_button.setEnabled(False)
         self.current_label = QLabel('Current: 0 A')
         self.current_label.setAlignment(Qt.AlignCenter)
@@ -308,6 +358,7 @@ class FourProbeResistance(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         try:
             current_min = self._eval_current_field(self.current_min_input, 'Current min')
             current_max = self._eval_current_field(self.current_max_input, 'Current max')
@@ -374,6 +425,7 @@ class FourProbeResistance(QWidget):
         self.collection_time = self.collection_time_input.value()
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         self.total_steps = self.estimate_total_steps()
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
 
@@ -540,15 +592,28 @@ class FourProbeResistance(QWidget):
         return pd.DataFrame(rows)
 
     def export_to_csv(self):
-        sample_name = self.sample_name_input.text() or 'sample'
-        contact_label = self.contact_label_input.text() or 'contacts'
-        sample_dir = op.join(self.folder, self.date, sample_name)
-        data_dir = op.join(sample_dir, 'data')
-        if not op.exists(data_dir):
-            os.makedirs(data_dir, exist_ok=True)
+        sample_name, _, data_dir = self._get_output_directories('data')
+        contact_label = self._get_contact_label()
         df = self.get_dataframe()
         name = f'{sample_name}_{contact_label}_{self.current_min}A_{self.current_max}A_{self.collection_time}ms'
-        df.to_csv(op.join(data_dir, f'FourProbe_{name}_{self.start_time}.data'), index=False)
+        output_path = op.join(data_dir, f'FourProbe_{name}_{self.start_time}.data')
+        df.to_csv(output_path, index=False)
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'contact_label_at_save': contact_label,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.measurements),
+            'data_columns': list(df.columns),
+            'data_file': output_path,
+            'metadata_file': op.join(data_dir, f'FourProbe_{name}_{self.start_time}.meta.json'),
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'remaining_runs_counter': self.remaining_runs,
+        })
+        write_json_file(metadata['metadata_file'], metadata)
 
     def make_plots(self):
         sample_name = self.sample_name_input.text() or 'sample'

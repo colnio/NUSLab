@@ -362,8 +362,12 @@ def set_drive_amplitude(daq: zi.ziDAQServer, dev: str, imps: int, value: float) 
 
     candidates = [
         f"{base}/drive",
+        f"{base}/drive/value",
+        f"{base}/drive/voltage",
         f"{base}/drive/level",
         f"{base}/drive/amplitude",
+        f"{base}/amplitude",
+        f"{base}/output/amplitude",
         f"{base}/osc/amp",
         f"{base}/osc/amplitude",
     ]
@@ -373,12 +377,17 @@ def set_drive_amplitude(daq: zi.ziDAQServer, dev: str, imps: int, value: float) 
 
     sigout_index = None
     osc_index = None
-    for p in (f"{base}/sigout", f"{base}/outputselect"):
+    for p in (
+        f"{base}/sigout",
+        f"{base}/sigoutselect",
+        f"{base}/outputselect",
+        f"{base}/output",
+    ):
         v = try_get_int(daq, p)
         if v is not None:
             sigout_index = v
             break
-    for p in (f"{base}/oscselect", f"{base}/oscindex"):
+    for p in (f"{base}/oscselect", f"{base}/oscindex", f"{base}/oscillator", f"{base}/osc"):
         v = try_get_int(daq, p)
         if v is not None:
             osc_index = v
@@ -615,20 +624,149 @@ def restore_state(daq: zi.ziDAQServer, snapshot: StateSnapshot) -> None:
             continue
 
 
-def get_latest_sample(daq: zi.ziDAQServer, path: str, timeout_s: float = 1.0) -> Dict:
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        data = daq.poll(0.1, 10, 0, True)
-        if path in data and data[path]:
-            sample = data[path]
-            out: Dict[str, object] = {}
-            for k, v in sample.items():
+def normalize_node_path(path: str) -> str:
+    parts = [p for p in str(path).strip().split("/") if p]
+    if not parts:
+        return "/"
+    return "/" + "/".join(parts).lower()
+
+
+def node_path_suffix(path: str) -> str:
+    norm = normalize_node_path(path)
+    parts = [p for p in norm.split("/") if p]
+    if len(parts) >= 2 and parts[0].startswith("dev"):
+        return "/" + "/".join(parts[1:])
+    return norm
+
+
+def sample_payload_has_data(sample: object) -> bool:
+    if sample is None:
+        return False
+    try:
+        return len(sample) > 0  # type: ignore[arg-type]
+    except Exception:
+        return True
+
+
+def sample_payload_to_last_values(sample: object) -> Dict[str, object]:
+    if isinstance(sample, np.ndarray):
+        names = sample.dtype.names
+        if names:
+            out_arr: Dict[str, object] = {}
+            for name in names:
                 try:
-                    out[k] = v[-1]
+                    values = sample[name]
+                    if isinstance(values, np.ndarray):
+                        out_arr[name] = values.reshape(-1)[-1] if values.size > 0 else values
+                    elif isinstance(values, (list, tuple)):
+                        out_arr[name] = values[-1] if len(values) > 0 else values
+                    else:
+                        out_arr[name] = values
                 except Exception:
-                    out[k] = v
-            return out
-    raise TimeoutError(f"No data for {path} within {timeout_s:.3f}s")
+                    continue
+            return out_arr
+        return {}
+
+    if not isinstance(sample, dict):
+        return {}
+    out: Dict[str, object] = {}
+    for key, value in sample.items():
+        try:
+            if isinstance(value, np.ndarray):
+                out[key] = value.reshape(-1)[-1] if value.size > 0 else value
+            elif isinstance(value, (list, tuple)):
+                out[key] = value[-1] if len(value) > 0 else value
+            else:
+                out[key] = value[-1]  # type: ignore[index]
+        except Exception:
+            out[key] = value
+    return out
+
+
+def flatten_poll_sample_nodes(data: object, prefix: str = "") -> Dict[str, object]:
+    out: Dict[str, object] = {}
+    if not isinstance(data, dict):
+        return out
+
+    for raw_key, raw_value in data.items():
+        key = str(raw_key)
+        if key.startswith("/"):
+            path = normalize_node_path(key)
+        else:
+            path = normalize_node_path(f"{prefix}/{key}")
+
+        if "/sample/" in path:
+            sample_path, field = path.split("/sample/", 1)
+            sample_key = f"{sample_path}/sample"
+            bucket = out.setdefault(sample_key, {})
+            if isinstance(bucket, dict):
+                bucket[field] = raw_value
+            continue
+
+        if "/sample." in path:
+            sample_path, field = path.split("/sample.", 1)
+            sample_key = f"{sample_path}/sample"
+            bucket = out.setdefault(sample_key, {})
+            if isinstance(bucket, dict):
+                bucket[field] = raw_value
+            continue
+
+        if path.endswith("/sample") and sample_payload_has_data(raw_value):
+            out[path] = raw_value
+            continue
+
+        if isinstance(raw_value, dict):
+            nested = flatten_poll_sample_nodes(raw_value, path)
+            if nested:
+                out.update(nested)
+    return out
+
+
+def extract_sample_payload(data: object, requested_path: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
+    sample_nodes = flatten_poll_sample_nodes(data)
+    if not sample_nodes:
+        return None, []
+
+    requested_norm = normalize_node_path(requested_path)
+    requested_suffix = node_path_suffix(requested_norm)
+
+    direct = sample_nodes.get(requested_norm)
+    if sample_payload_has_data(direct):
+        last_values = sample_payload_to_last_values(direct)
+        if last_values:
+            return last_values, list(sample_nodes.keys())
+
+    for node_path, payload in sample_nodes.items():
+        if node_path_suffix(node_path) == requested_suffix and sample_payload_has_data(payload):
+            last_values = sample_payload_to_last_values(payload)
+            if last_values:
+                return last_values, list(sample_nodes.keys())
+
+    return None, list(sample_nodes.keys())
+
+
+def get_latest_sample(daq: zi.ziDAQServer, path: str, timeout_s: float = 1.0) -> Dict:
+    timeout = max(0.2, float(timeout_s))
+    t0 = time.time()
+    seen_sample_nodes: List[str] = []
+
+    while time.time() - t0 < timeout:
+        data = daq.poll(0.1, 10, 0, True)
+        sample, sample_nodes = extract_sample_payload(data, path)
+        if sample is not None:
+            return sample
+        if sample_nodes:
+            seen_sample_nodes = sample_nodes
+
+    if seen_sample_nodes:
+        listed = ", ".join(seen_sample_nodes[:4])
+        if len(seen_sample_nodes) > 4:
+            listed += ", ..."
+        raise TimeoutError(
+            f"No data for {path} within {timeout:.3f}s (seen sample nodes: {listed})"
+        )
+
+    raise TimeoutError(f"No data for {path} within {timeout:.3f}s")
 
 
 def combo_value(combo: QComboBox) -> object:
@@ -669,6 +807,7 @@ class SweepWorker(QObject):
         super().__init__()
         self.cfg = cfg
         self._stop = False
+        self._setpoint_warned: Dict[str, bool] = {}
 
     @pyqtSlot()
     def request_stop(self) -> None:
@@ -746,10 +885,33 @@ class SweepWorker(QObject):
         if kind == "amplitude":
             set_paths = set_drive_amplitude(daq, dev, imps, float(target))
             if not set_paths:
-                self.log.emit("Warning: no known drive node accepted amplitude write.")
+                if not self._setpoint_warned.get("amplitude", False):
+                    self.log.emit(
+                        "Warning: no known drive node accepted amplitude write; will retry."
+                    )
+                    self._setpoint_warned["amplitude"] = True
+                return last_value
+            self._setpoint_warned["amplitude"] = False
             return float(target)
         if kind == "frequency":
-            try_set_double(daq, [f"{base}/freq", f"{base}/osc/freq"], float(target))
+            set_path = try_set_double(
+                daq,
+                [
+                    f"{base}/freq",
+                    f"{base}/frequency",
+                    f"{base}/osc/freq",
+                    f"{base}/osc/frequency",
+                ],
+                float(target),
+            )
+            if set_path is None:
+                if not self._setpoint_warned.get("frequency", False):
+                    self.log.emit(
+                        "Warning: no known frequency node accepted write; will retry."
+                    )
+                    self._setpoint_warned["frequency"] = True
+                return last_value
+            self._setpoint_warned["frequency"] = False
             return float(target)
         return last_value
 
@@ -1121,6 +1283,7 @@ class SweepWorker(QObject):
         imps: int,
         curr_idx: Optional[int],
         settle_s: float,
+        logger: Optional[logging.Logger] = None,
         max_attempts: int = 4,
     ) -> Tuple[Dict, Tuple[float, float], int]:
         timeout_s = max(1.0, settle_s * 5.0)
@@ -1131,7 +1294,12 @@ class SweepWorker(QObject):
         state = (float("nan"), float("nan"))
 
         for attempt in range(1, max_attempts + 1):
-            sample = get_latest_sample(daq, sample_path, timeout_s=timeout_s)
+            sample = self._read_sample_with_recovery(
+                daq=daq,
+                path=sample_path,
+                timeout_s=timeout_s,
+                logger=logger,
+            )
             state = self._read_range_state(daq, dev, imps, curr_idx)
             if prev_state is not None and self._range_states_close(prev_state, state):
                 return sample, state, attempt
@@ -1140,6 +1308,55 @@ class SweepWorker(QObject):
                 time.sleep(wait_s)
 
         return sample, state, max_attempts
+
+    def _read_sample_with_recovery(
+        self,
+        daq: zi.ziDAQServer,
+        path: str,
+        timeout_s: float,
+        logger: Optional[logging.Logger] = None,
+        retries: int = 2,
+        allow_resubscribe: bool = True,
+    ) -> Dict:
+        last_exc: Optional[Exception] = None
+        retries_use = max(1, int(retries))
+        timeout_base = max(0.2, float(timeout_s))
+
+        for attempt in range(1, retries_use + 1):
+            timeout_try = timeout_base * (1.0 + 0.25 * (attempt - 1))
+            try:
+                return get_latest_sample(daq, path, timeout_s=timeout_try)
+            except TimeoutError as exc:
+                last_exc = exc
+                if logger is not None and attempt < retries_use:
+                    self._log(
+                        logger,
+                        f"Warning: sample timeout on {path} (attempt {attempt}/{retries_use}); retrying.",
+                    )
+                try:
+                    daq.sync()
+                except Exception:
+                    pass
+
+                if allow_resubscribe and attempt == 1:
+                    try:
+                        daq.unsubscribe(path)
+                    except Exception:
+                        pass
+                    try:
+                        daq.subscribe(path)
+                    except Exception:
+                        pass
+                    try:
+                        daq.sync()
+                    except Exception:
+                        pass
+
+                time.sleep(0.015 * attempt)
+
+        if last_exc is not None:
+            raise last_exc
+        raise TimeoutError(f"No data for {path} within {timeout_base:.3f}s")
 
     @pyqtSlot()
     def run(self) -> None:
@@ -1348,6 +1565,7 @@ class SweepWorker(QObject):
                                 imps=self.cfg.imps,
                                 curr_idx=meas_curr_idx,
                                 settle_s=block.settle_s,
+                                logger=logger,
                                 max_attempts=4,
                             )
                             if attempts >= 3 and not range_stabilize_warned:
@@ -1357,8 +1575,11 @@ class SweepWorker(QObject):
                                 )
                                 range_stabilize_warned = True
                         else:
-                            sample = get_latest_sample(
-                                daq, sample_path, timeout_s=max(1.0, block.settle_s * 5.0)
+                            sample = self._read_sample_with_recovery(
+                                daq=daq,
+                                path=sample_path,
+                                timeout_s=max(1.0, block.settle_s * 5.0),
+                                logger=logger,
                             )
                             range_state = self._read_range_state(
                                 daq, dev, self.cfg.imps, meas_curr_idx
@@ -1372,8 +1593,11 @@ class SweepWorker(QObject):
                             guard_wait = max(0.015, min(0.08, 0.5 * max(0.0, block.settle_s)))
                             if guard_wait > 0:
                                 time.sleep(guard_wait)
-                            sample = get_latest_sample(
-                                daq, sample_path, timeout_s=max(1.0, block.settle_s * 5.0)
+                            sample = self._read_sample_with_recovery(
+                                daq=daq,
+                                path=sample_path,
+                                timeout_s=max(1.0, block.settle_s * 5.0),
+                                logger=logger,
                             )
                             range_state = self._read_range_state(
                                 daq, dev, self.cfg.imps, meas_curr_idx
@@ -1401,6 +1625,7 @@ class SweepWorker(QObject):
                                 imps=self.cfg.imps,
                                 curr_idx=meas_curr_idx,
                                 settle_s=block.settle_s + extra_wait,
+                                logger=logger,
                                 max_attempts=4,
                             )
                         prev_point_range_state = range_state
@@ -1408,8 +1633,13 @@ class SweepWorker(QObject):
                         demod_sample = None
                         if demod_path is not None:
                             try:
-                                demod_sample = get_latest_sample(
-                                    daq, demod_path, timeout_s=max(0.3, block.settle_s * 2.0)
+                                demod_sample = self._read_sample_with_recovery(
+                                    daq=daq,
+                                    path=demod_path,
+                                    timeout_s=max(0.3, block.settle_s * 2.0),
+                                    logger=None,
+                                    retries=1,
+                                    allow_resubscribe=False,
                                 )
                             except Exception:
                                 if not demod_warned:

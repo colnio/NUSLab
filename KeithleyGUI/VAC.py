@@ -19,6 +19,7 @@ from ui_helpers import (
 import pandas as pd
 import time
 import datetime
+import json
 import matplotlib.pyplot as plt
 import os.path as op
 import os
@@ -43,12 +44,15 @@ class VACRegime(QWidget):
         self.noise_data = []  # For storing I(t) during measurements
         self.n_runs = 2
         self.current_range = 1e-8
+        self.manual_current_range = None
         self.direction = 1
+        self.initial_sweep_direction = 1
         self.active_compliance = 1
         # Polarity-aware compliance switching helpers
         self._last_comp_polarity = None  # 'neg' or 'pos'
         self.prev_voltage = 0.0
         self.compliance_relaxed_factor = 10.0  # compliance multiplier when a side is unchecked
+        self.measurement_metadata = {}
 
         # Setup GUI components
         self.initUI()
@@ -62,9 +66,174 @@ class VACRegime(QWidget):
         # date & make folder
         self.date = str(datetime.date.today())
         self.folder = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
-        if op.exists(op.join(self.folder, self.date)) == False:
+        if self.folder and op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
+
+    def _get_sample_name(self):
+        sample_name = self.sample_name_input.text().strip() or self.sample_name.strip() or 'sample'
+        self.sample_name = sample_name
+        return sample_name
+
+    def _ensure_directory(self, path, label):
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"Failed to create {label} directory:\n{path}\n\n{exc}") from exc
+        if not op.isdir(path):
+            raise RuntimeError(f"{label} directory was not created:\n{path}")
+        return path
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = self._ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = self._ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = self._ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _get_device_metadata(self):
+        selection_text = str(self.device_address or self.device_address_input.currentText()).strip()
+        device_metadata = {
+            'selection_text': selection_text,
+            'resource': keithley._extract_resource_token(selection_text) if selection_text else '',
+            'reported_model': '',
+            'reported_driver_class': '',
+            'reported_idn': '',
+            'vendor': '',
+            'model': '',
+            'serial': '',
+            'firmware': '',
+            'runtime_class': type(self.device).__name__ if self.device is not None else '',
+            'runtime_gpib_address': getattr(self.device, 'gpib_address', ''),
+            'runtime_resource_name': getattr(getattr(self.device, 'device', None), 'resource_name', ''),
+        }
+        if selection_text == 'Mock':
+            device_metadata['reported_model'] = 'Mock'
+            device_metadata['reported_driver_class'] = 'Keithley6517B_Mock'
+            device_metadata['reported_idn'] = 'Mock'
+        elif selection_text:
+            parts = selection_text.split(' - ', 3)
+            if len(parts) > 1:
+                device_metadata['reported_model'] = parts[1].strip()
+            if len(parts) > 2:
+                device_metadata['reported_driver_class'] = parts[2].strip()
+            if len(parts) > 3:
+                device_metadata['reported_idn'] = parts[3].strip()
+        vendor, model, serial, firmware = keithley._parse_idn(device_metadata['reported_idn'])
+        device_metadata['vendor'] = vendor
+        device_metadata['model'] = model or device_metadata['reported_model']
+        device_metadata['serial'] = serial
+        device_metadata['firmware'] = firmware
+        return device_metadata
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'VAC',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self.sample_name,
+            'device': self._get_device_metadata(),
+            'parameters': {
+                'voltage_min_v': self.voltage_min,
+                'voltage_max_v': self.voltage_max,
+                'voltage_step_v': self.voltage_step,
+                'compliance_current_a': self.compliance_current,
+                'collection_time_ms': self.collection_time,
+                'nplc': self.nplc,
+                'current_range_setting': self.current_range,
+                'n_runs_requested': self.n_runs,
+                'initial_sweep_direction': 'negative_first' if self.initial_sweep_direction < 0 else 'positive_first',
+                'polarity_compliance_neg_enabled': self.chk_comp_neg.isChecked(),
+                'polarity_compliance_pos_enabled': self.chk_comp_pos.isChecked(),
+                'initial_active_compliance_a': self.active_compliance,
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
+
+    def _polarity_for_voltage(self, voltage, direction_hint=None):
+        if voltage < 0:
+            return 'neg'
+        if voltage > 0:
+            return 'pos'
+        direction = self.direction if direction_hint is None else direction_hint
+        if direction == 0:
+            direction = self.initial_sweep_direction
+        return 'neg' if direction < 0 else 'pos'
+
+    def _compliance_enabled_for_voltage(self, voltage, direction_hint=None):
+        side = self._polarity_for_voltage(voltage, direction_hint=direction_hint)
+        return self.chk_comp_neg.isChecked() if side == 'neg' else self.chk_comp_pos.isChecked()
+
+    def _apply_measurement_range_for_voltage(self, voltage, direction_hint=None):
+        if self.device is None or not hasattr(self.device, 'set_current_range'):
+            return
+
+        desired_range = None
+        if self.manual_current_range is not None:
+            desired_range = self.manual_current_range
+            if isinstance(self.device, keithley.Keithley6430) and self._compliance_enabled_for_voltage(voltage, direction_hint=direction_hint):
+                desired_range = min(desired_range, float(self.active_compliance))
+        elif isinstance(self.device, keithley.Keithley6430) and self._compliance_enabled_for_voltage(voltage, direction_hint=direction_hint):
+            desired_range = float(self.active_compliance)
+
+        if desired_range is None:
+            return
+
+        try:
+            desired_range = max(abs(float(desired_range)), 1e-12)
+            self.device.set_current_range(desired_range)
+        except Exception as exc:
+            print(f"[warn] set_current_range failed: {exc}")
+
+    def _prepare_measurement_range_and_compliance(self, voltage):
+        if type(self.device) == keithley.Keithley6517B or type(self.device) == keithley.Keithley6517B_Mock:
+            return
+
+        previous_sign = float(self.prev_voltage)
+        target_sign = float(np.sign(voltage))
+        crossed = target_sign != previous_sign
+        if not crossed:
+            return
+
+        # Move through 0 V before tightening the sense settings for the next polarity.
+        if previous_sign != 0:
+            try:
+                self.device.set_voltage(0)
+            except Exception as exc:
+                print(f"[warn] zero-crossing voltage reset failed: {exc}")
+
+        comp = self._apply_compliance_for_voltage(voltage, direction_hint=self.direction)
+        if comp is not None:
+            self.active_compliance = comp
+        self._apply_measurement_range_for_voltage(voltage, direction_hint=self.direction)
+
+    def _build_data_metadata(self, sample_name, output_path, metadata_path):
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.measurements),
+            'data_columns': ['Voltage', 'Current', 'Direction', 'Timestamp', 'Nruns'],
+            'data_file': output_path,
+            'metadata_file': metadata_path,
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'remaining_runs_counter': self.n_runs,
+        })
+        metadata['parameters'] = dict(metadata.get('parameters', {}))
+        metadata['parameters'].update({
+            'final_active_compliance_a': self.active_compliance,
+        })
+        return metadata
 
     def initUI(self):
         self.setWindowTitle('Keithley IV')
@@ -135,6 +304,13 @@ class VACRegime(QWidget):
         voltage_step_layout.addWidget(self.voltage_step_input)
         layout.addLayout(voltage_step_layout)
 
+        initial_sweep_layout = QHBoxLayout()
+        self.initial_sweep_direction_input = QComboBox()
+        self.initial_sweep_direction_input.addItems(['+ first', '- first'])
+        initial_sweep_layout.addWidget(QLabel('Initial sweep direction:'))
+        initial_sweep_layout.addWidget(self.initial_sweep_direction_input)
+        layout.addLayout(initial_sweep_layout)
+
         # nruns input
         nruns_layout = QHBoxLayout()
         self.nruns_input = QSpinBox()
@@ -181,7 +357,7 @@ class VACRegime(QWidget):
         self.voltage_now.adjustSize()
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.voltage_now)
         button_layout.addWidget(self.stop_button)
@@ -244,7 +420,7 @@ class VACRegime(QWidget):
         if self.voltage_step <= 0:
             return 1
         runs = int(self.n_runs)
-        direction = 1
+        direction = self.initial_sweep_direction
         voltage = 0.0
         steps = 0
         max_iter = 5_000_000
@@ -264,7 +440,7 @@ class VACRegime(QWidget):
         return max(1, steps)
 
     # ===================== Helper: set compliance per polarity =====================
-    def _apply_compliance_for_voltage(self, voltage):
+    def _apply_compliance_for_voltage(self, voltage, direction_hint=None):
         """
         Apply instrument compliance for the current voltage side.
         Only applies to non-6517B devices (e.g., 6430).
@@ -282,16 +458,20 @@ class VACRegime(QWidget):
         want_neg = self.chk_comp_neg.isChecked()
         want_pos = self.chk_comp_pos.isChecked()
         print(want_neg, want_pos)
-        side = 'neg' if voltage < 0 else 'pos'
+        side = self._polarity_for_voltage(voltage, direction_hint=direction_hint)
         if (side == 'neg' and want_neg) or (side == 'pos' and want_pos):
             comp_to_set = user_comp
         else:
             comp_to_set = 1  # relaxed on unchecked side
 
+        if self._last_comp_polarity == side and self.active_compliance == comp_to_set:
+            return comp_to_set
+
         # Set the compliance on the instrument (method name as in your code)
         try:
             print(f'setting compliance to {comp_to_set}')
             self.device.set_complicance_current(comp_to_set)
+            self._last_comp_polarity = side
         except Exception as e:
             print(f"[warn] set_complicance_current failed: {e}")
         return comp_to_set
@@ -300,6 +480,7 @@ class VACRegime(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         self.voltage_min = self.voltage_min_input.value()
         self.voltage_max = self.voltage_max_input.value()
         self.voltage_step = self.voltage_step_input.value()
@@ -312,17 +493,20 @@ class VACRegime(QWidget):
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.device_address_input.currentText()
-        self.sample_name = self.sample_name_input.text()
+        self.sample_name = self._get_sample_name()
         self.current_range = self.current_range_input.currentText()
-        self.direction = 1
+        self.manual_current_range = None
+        self.initial_sweep_direction = 1 if self.initial_sweep_direction_input.currentIndex() == 0 else -1
+        self.direction = self.initial_sweep_direction
         print('Device address: ', self.device_address)
         self.device = keithley.get_device(self.device_address, nplc=self.nplc)
         self.active_compliance = self.compliance_current
+        self._last_comp_polarity = None
         # Clear previous measurements and noise data
         self.measurements = []
         self.noise_data = []
         self.current_voltage = 0
-        self.prev_voltage = 0.1
+        self.prev_voltage = 0.0
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
         if self.device == None:
             QMessageBox.critical(None, "Error", f"Device {self.device_address} is unkonw or not found")
@@ -332,16 +516,17 @@ class VACRegime(QWidget):
             self.device.set_voltage_range(max(abs(self.voltage_min), abs(self.voltage_max)))
         if self.current_range != 'Auto-range':
             try:
-                self.device.set_current_range(parse_numeric_text(self.current_range, "Current range"))
+                self.manual_current_range = parse_numeric_text(self.current_range, "Current range")
             except Exception:
                 QMessageBox.critical(None, "Error", f"Invalid current range: {self.current_range}")
                 return
-        if type(self.device) == keithley.Keithley6430:
-            # Ensure a valid baseline compliance is set according to side/checkboxes
-            comp = self._apply_compliance_for_voltage(self.current_voltage)  # at 0 V treat as 'pos'
-            if comp is not None:
-                self.active_compliance = comp
+            try:
+                self.device.set_current_range(self.manual_current_range)
+            except Exception as exc:
+                QMessageBox.critical(None, "Error", f"Failed to set current range: {exc}")
+                return
         self.total_steps = self.estimate_total_steps()
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
 
@@ -368,9 +553,18 @@ class VACRegime(QWidget):
         self.voltage_now.adjustSize()
         self.timer.stop()
         if save and self.measurements:
-            self.make_plot()
-            self.export_to_csv()
-        self.direction = 1
+            save_errors = []
+            try:
+                self.export_to_csv()
+            except Exception as exc:
+                save_errors.append(f"Failed to save data:\n{exc}")
+            try:
+                self.make_plot()
+            except Exception as exc:
+                save_errors.append(f"Failed to save plots:\n{exc}")
+            if save_errors:
+                QMessageBox.critical(self, "Save Error", "\n\n".join(save_errors))
+        self.direction = self.initial_sweep_direction
 
     def perform_measurement(self):
         # Perform signal integration over the collection time
@@ -379,19 +573,10 @@ class VACRegime(QWidget):
         num_measurements = 0
         noise_currents = []  # Store the current noise
 
+        self._prepare_measurement_range_and_compliance(self.current_voltage)
         self.device.set_voltage(self.current_voltage)
         self.voltage_now.setText('{:.2f} V, n = {}'.format(self.current_voltage, self.n_runs))
         self.voltage_now.adjustSize()
-
-        # Switch compliance ONLY when crossing 0 V (non-6517B)
-        # if not isinstance(self.device, keithley.Keithley6517B):
-        # print(self.current_voltage, self.prev_voltage)
-        crossed = (np.sign(self.current_voltage) != np.sign(self.prev_voltage))
-        # print(crossed)
-        if crossed and not (type(self.device) == keithley.Keithley6517B) and not (type(self.device) == keithley.Keithley6517B_Mock):
-            comp = self._apply_compliance_for_voltage(self.current_voltage)
-            if comp is not None:
-                self.active_compliance = comp
 
         p1 = None
         if len(self.measurements) > 0:
@@ -467,14 +652,25 @@ class VACRegime(QWidget):
             self.abs_iv_plot.plot([voltages[-1]], [abs_currents[-1]], pen=None, symbol='+', symbolPen=None, symbolSize=10, symbolBrush=(0, 0, 0, 255), clear=False)
 
     def export_to_csv(self):
-        sample_dir = op.join(self.folder, self.date, self.sample_name)
-        if not op.exists(sample_dir):
-            os.makedirs(sample_dir)
-        if not op.exists(op.join(sample_dir, 'data')):
-            os.makedirs(op.join(sample_dir, 'data'))
-        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        sample_name, _, data_dir = self._get_output_directories('data')
+        name = f'{sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'VAC_{name}_{self.start_time}.data'), index=False)
+        output_path = op.join(data_dir, f'VAC_{name}_{self.start_time}.data')
+        try:
+            df.to_csv(output_path, index=False)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write data file:\n{output_path}\n\n{exc}") from exc
+        if not op.isfile(output_path):
+            raise RuntimeError(f"Data file was not created:\n{output_path}")
+        metadata_path = op.join(data_dir, f'VAC_{name}_{self.start_time}.meta.json')
+        metadata = self._build_data_metadata(sample_name, output_path, metadata_path)
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as meta_file:
+                json.dump(metadata, meta_file, indent=2)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write metadata file:\n{metadata_path}\n\n{exc}") from exc
+        if not op.isfile(metadata_path):
+            raise RuntimeError(f"Metadata file was not created:\n{metadata_path}")
         del df
 
     def get_pandas_data(self):
@@ -482,12 +678,8 @@ class VACRegime(QWidget):
         return df
 
     def make_plot(self):
-        sample_dir = op.join(self.folder, self.date, self.sample_name)
-        if not op.exists(sample_dir):
-            os.makedirs(sample_dir)
-        if not op.exists(op.join(sample_dir, 'plots')):
-            os.makedirs(op.join(sample_dir, 'plots'))
-        name = f'{self.sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
+        sample_name, _, plot_dir = self._get_output_directories('plots')
+        name = f'{sample_name}_{self.voltage_min}V_{self.voltage_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
 
         up = df.where(df['Direction'] == 1).dropna().sort_values('Voltage')
@@ -501,7 +693,13 @@ class VACRegime(QWidget):
         plt.ylabel('Current (A)')
 
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}.png'), dpi=300)
+        linear_plot_path = op.join(plot_dir, f'VAC_{name}_{self.start_time}.png')
+        try:
+            plt.savefig(linear_plot_path, dpi=300)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write plot file:\n{linear_plot_path}\n\n{exc}") from exc
+        if not op.isfile(linear_plot_path):
+            raise RuntimeError(f"Plot file was not created:\n{linear_plot_path}")
         f1.clf()
 
         f2 = plt.figure(figsize=(10, 6), dpi=300)
@@ -513,7 +711,13 @@ class VACRegime(QWidget):
         plt.ylabel('Current (A)')
         plt.yscale('log')
         plt.legend()
-        plt.savefig(op.join(sample_dir, 'plots', f'VAC_{name}_{self.start_time}_logscaleY.png'), dpi=300)
+        log_plot_path = op.join(plot_dir, f'VAC_{name}_{self.start_time}_logscaleY.png')
+        try:
+            plt.savefig(log_plot_path, dpi=300)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write plot file:\n{log_plot_path}\n\n{exc}") from exc
+        if not op.isfile(log_plot_path):
+            raise RuntimeError(f"Plot file was not created:\n{log_plot_path}")
         del df, up, down
         f2.clf()
         matplotlib.pyplot.close(f1)

@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Force -Path $specRoot | Out-Null
 $apps = @(
     @{ Script = "VAC.py"; Name = "Keithley-VAC"; Icon = "icons\VAC.ico" },
     @{ Script = "AVC.py"; Name = "Keithley-AVC"; Icon = "icons\AVC.ico" },
+    @{ Script = "FastVAC.py"; Name = "Keithley-Fast-VAC"; Icon = "icons\FVC.ico" },
     @{ Script = "Pulses.py"; Name = "Keithley-Pulses"; Icon = "icons\PUL.ico" },
     @{ Script = "FET.py"; Name = "Keithley-FET"; Icon = "icons\FET.ico" },
     @{ Script = "FET_map.py"; Name = "Keithley-FET-Map"; Icon = "icons\MAP.ico" },

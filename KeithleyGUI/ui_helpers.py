@@ -2,6 +2,9 @@ import time
 from typing import Iterable, List, Optional
 import ast
 import operator
+import json
+import os
+import os.path as op
 
 
 def build_device_display_list(keithley_module, include_mock: bool = True) -> List[str]:
@@ -123,6 +126,63 @@ def apply_standard_window_style(widget):
         }
         QProgressBar::chunk { background-color: #16a34a; }
     """)
+
+
+def ensure_directory(path: str, label: str) -> str:
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to create {label} directory:\n{path}\n\n{exc}") from exc
+    if not op.isdir(path):
+        raise RuntimeError(f"{label} directory was not created:\n{path}")
+    return path
+
+
+def build_device_metadata(keithley_module, selection_text: str, runtime_device=None) -> dict:
+    selection = str(selection_text or "").strip()
+    metadata = {
+        'selection_text': selection,
+        'resource': keithley_module._extract_resource_token(selection) if selection else '',
+        'reported_model': '',
+        'reported_driver_class': '',
+        'reported_idn': '',
+        'vendor': '',
+        'model': '',
+        'serial': '',
+        'firmware': '',
+        'runtime_class': type(runtime_device).__name__ if runtime_device is not None else '',
+        'runtime_gpib_address': getattr(runtime_device, 'gpib_address', ''),
+        'runtime_resource_name': getattr(getattr(runtime_device, 'device', None), 'resource_name', ''),
+    }
+    if selection == 'Mock':
+        metadata['reported_model'] = 'Mock'
+        metadata['reported_driver_class'] = 'Mock'
+        metadata['reported_idn'] = 'Mock'
+    elif selection:
+        parts = selection.split(' - ', 3)
+        if len(parts) > 1:
+            metadata['reported_model'] = parts[1].strip()
+        if len(parts) > 2:
+            metadata['reported_driver_class'] = parts[2].strip()
+        if len(parts) > 3:
+            metadata['reported_idn'] = parts[3].strip()
+    vendor, model, serial, firmware = keithley_module._parse_idn(metadata['reported_idn'])
+    metadata['vendor'] = vendor
+    metadata['model'] = model or metadata['reported_model']
+    metadata['serial'] = serial
+    metadata['firmware'] = firmware
+    return metadata
+
+
+def write_json_file(path: str, payload: dict, label: str = 'metadata') -> str:
+    try:
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, indent=2)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write {label} file:\n{path}\n\n{exc}") from exc
+    if not op.isfile(path):
+        raise RuntimeError(f"{label.capitalize()} file was not created:\n{path}")
+    return path
 
 
 _ALLOWED_BIN_OPS = {

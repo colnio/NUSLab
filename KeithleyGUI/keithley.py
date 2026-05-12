@@ -4,6 +4,14 @@ import numpy as np
 from pyvisa import ResourceManager
 
 
+FAST_VAC_LIST_MAX_POINTS = 2500
+FAST_VAC_MEMORY_MAX_POINTS = 100
+FAST_VAC_NO_COMPLIANCE_CURRENT = 1.05
+_FAST_READBACK_SENTINEL = 9.9e37
+_STATUS_BIT_COMPLIANCE = 1 << 3
+_STATUS_BIT_RANGE_COMPLIANCE = 1 << 16
+
+
 def _first_float_from_csv(raw: str, fallback=np.nan):
     for token in str(raw).strip().split(','):
         try:
@@ -93,7 +101,9 @@ def _model_to_class_name(model_upper: str):
     m = model_upper.upper()
     if "6517" in m:
         return "Keithley6517B"
-    if "6430" in m or "2400" in m:
+    if "2400" in m:
+        return "Keithley2400"
+    if "6430" in m:
         return "Keithley6430"
     if "6514" in m:
         return "Keithley6514"
@@ -134,6 +144,239 @@ def _query_idn(resource, timeout_ms=3000):
     except Exception:
         idn = ""
     return idn
+
+
+def _normalized_engine_name(engine: str) -> str:
+    text = str(engine or "").strip().lower().replace('-', ' ')
+    if text in {"memory", "mem", "source memory", "sourcememory"}:
+        return "memory"
+    return "list"
+
+
+def fast_vac_point_limit(engine: str) -> int:
+    return FAST_VAC_MEMORY_MAX_POINTS if _normalized_engine_name(engine) == "memory" else FAST_VAC_LIST_MAX_POINTS
+
+
+def _normalize_float_for_path(value):
+    try:
+        value = float(value)
+    except Exception:
+        return 0.0
+    if not np.isfinite(value):
+        return 0.0
+    if abs(value) < 1e-15:
+        return 0.0
+    return value
+
+
+def _inclusive_linear_values(start, stop, step):
+    start = float(start)
+    stop = float(stop)
+    step = abs(float(step))
+    if step <= 0:
+        raise ValueError("Voltage step must be positive.")
+
+    values = []
+    current = start
+    direction = 1.0 if stop >= start else -1.0
+    limit = stop
+    max_iter = 1_000_000
+    for _ in range(max_iter):
+        values.append(_normalize_float_for_path(current))
+        current += direction * step
+        if direction > 0 and current >= limit:
+            if not np.isclose(values[-1], stop, atol=1e-12, rtol=1e-9):
+                values.append(_normalize_float_for_path(stop))
+            break
+        if direction < 0 and current <= limit:
+            if not np.isclose(values[-1], stop, atol=1e-12, rtol=1e-9):
+                values.append(_normalize_float_for_path(stop))
+            break
+    else:
+        raise ValueError("Voltage path generation exceeded maximum iterations.")
+    return values
+
+
+def build_fast_vac_subcycle_points(voltage_min, voltage_max, voltage_step, polarity: str):
+    voltage_min = float(voltage_min)
+    voltage_max = float(voltage_max)
+    voltage_step = abs(float(voltage_step))
+    if voltage_step <= 0:
+        raise ValueError("Voltage step must be positive.")
+    if voltage_min > voltage_max:
+        raise ValueError("Voltage min must be <= voltage max.")
+
+    side = str(polarity or "").strip().lower()
+    if side.startswith('p'):
+        if voltage_max <= 0:
+            return []
+        start = voltage_min if voltage_min > 0 else min(voltage_step, voltage_max)
+        monotonic = _inclusive_linear_values(start, voltage_max, voltage_step)
+    elif side.startswith('n'):
+        if voltage_min >= 0:
+            return []
+        start = voltage_max if voltage_max < 0 else -min(voltage_step, abs(voltage_min))
+        monotonic = _inclusive_linear_values(start, voltage_min, voltage_step)
+    else:
+        raise ValueError(f"Unsupported polarity: {polarity}")
+
+    if not monotonic:
+        return []
+    return [0.0] + monotonic + monotonic[-2::-1] + [0.0]
+
+
+def fast_vac_subcycle_point_counts(voltage_min, voltage_max, voltage_step):
+    return {
+        "positive": len(build_fast_vac_subcycle_points(voltage_min, voltage_max, voltage_step, "positive")),
+        "negative": len(build_fast_vac_subcycle_points(voltage_min, voltage_max, voltage_step, "negative")),
+    }
+
+
+def validate_fast_vac_subcycle_lengths(voltage_min, voltage_max, voltage_step, engine):
+    counts = fast_vac_subcycle_point_counts(voltage_min, voltage_max, voltage_step)
+    limit = int(fast_vac_point_limit(engine))
+    over_limit = {
+        polarity: count
+        for polarity, count in counts.items()
+        if int(count) > limit
+    }
+    return {
+        "limit": limit,
+        "counts": counts,
+        "over_limit": over_limit,
+        "is_valid": not over_limit,
+    }
+
+
+def chunk_zero_return_points(points, max_points=FAST_VAC_LIST_MAX_POINTS):
+    cleaned = [_normalize_float_for_path(value) for value in list(points or [])]
+    if not cleaned:
+        return []
+    if max_points < 3:
+        raise ValueError("max_points must be at least 3 for zero-return batching.")
+    if len(cleaned) <= max_points:
+        return [cleaned]
+
+    interior = cleaned[1:-1]
+    if not interior:
+        return [cleaned]
+
+    chunks = []
+    chunk_size = max_points - 2
+    for idx in range(0, len(interior), chunk_size):
+        window = interior[idx:idx + chunk_size]
+        chunks.append([0.0] + window + [0.0])
+    return chunks
+
+
+def plan_fast_vac_batches(
+    voltage_min,
+    voltage_max,
+    voltage_step,
+    cycles,
+    initial_direction=1,
+    engine="list",
+    list_limit=FAST_VAC_LIST_MAX_POINTS,
+    memory_limit=FAST_VAC_MEMORY_MAX_POINTS,
+):
+    voltage_min = float(voltage_min)
+    voltage_max = float(voltage_max)
+    voltage_step = abs(float(voltage_step))
+    cycles = int(cycles)
+    if voltage_step <= 0:
+        raise ValueError("Voltage step must be positive.")
+    if voltage_min > voltage_max:
+        raise ValueError("Voltage min must be <= voltage max.")
+    if cycles <= 0:
+        raise ValueError("Cycles must be positive.")
+
+    engine_name = _normalized_engine_name(engine)
+    cycle_sides = ["positive", "negative"] if int(initial_direction) >= 0 else ["negative", "positive"]
+    side_points = {
+        "positive": build_fast_vac_subcycle_points(voltage_min, voltage_max, voltage_step, "positive"),
+        "negative": build_fast_vac_subcycle_points(voltage_min, voltage_max, voltage_step, "negative"),
+    }
+    batches = []
+    for cycle_index in range(1, cycles + 1):
+        subcycle_index = 0
+        for side in cycle_sides:
+            points = side_points.get(side) or []
+            if not points:
+                continue
+            subcycle_index += 1
+            if engine_name == "memory":
+                if len(points) > int(memory_limit):
+                    raise ValueError(
+                        f"{side.title()} subcycle requires {len(points)} points, "
+                        f"exceeding source-memory limit of {int(memory_limit)}."
+                    )
+                chunked = [points]
+            else:
+                chunked = chunk_zero_return_points(points, max_points=int(list_limit))
+
+            for batch_index, chunk in enumerate(chunked, start=1):
+                batches.append({
+                    "cycle_index": cycle_index,
+                    "subcycle_index": subcycle_index,
+                    "batch_index": batch_index,
+                    "polarity": side,
+                    "points": chunk,
+                    "expected_points": len(chunk),
+                    "engine": "Source Memory" if engine_name == "memory" else "List",
+                })
+    return batches
+
+
+def decode_2400_status(status_value):
+    try:
+        raw_status = int(round(float(status_value)))
+    except Exception:
+        raw_status = 0
+    return {
+        "Status": raw_status,
+        "InCompliance": bool(raw_status & _STATUS_BIT_COMPLIANCE),
+        "RangeCompliance": bool(raw_status & _STATUS_BIT_RANGE_COMPLIANCE),
+    }
+
+
+def parse_2400_sweep_readback(raw: str, element_order=None):
+    if element_order is None:
+        element_order = ("VOLT", "CURR", "TIME", "STAT")
+    tokens = [token.strip() for token in str(raw or "").strip().split(',') if token.strip()]
+    if not tokens:
+        return []
+    width = len(tuple(element_order))
+    if width <= 0:
+        raise ValueError("element_order must not be empty.")
+    if len(tokens) % width != 0:
+        raise ValueError(
+            f"Unexpected READ? payload width: received {len(tokens)} tokens for {width} elements."
+        )
+
+    rows = []
+    keys = [str(item).strip().upper() for item in element_order]
+    for idx in range(0, len(tokens), width):
+        subset = tokens[idx:idx + width]
+        row = {
+            "Voltage": np.nan,
+            "Current": np.nan,
+            "Timestamp_s": np.nan,
+            "Status": 0,
+            "InCompliance": False,
+            "RangeCompliance": False,
+        }
+        for key, token in zip(keys, subset):
+            value = _first_float_from_csv(token, fallback=np.nan)
+            if key.startswith("VOLT"):
+                row["Voltage"] = np.nan if (not np.isfinite(value) or abs(value) >= _FAST_READBACK_SENTINEL) else float(value)
+            elif key.startswith("CURR"):
+                row["Current"] = np.nan if (not np.isfinite(value) or abs(value) >= _FAST_READBACK_SENTINEL) else float(value)
+            elif key.startswith("TIME"):
+                row["Timestamp_s"] = np.nan if (not np.isfinite(value) or abs(value) >= _FAST_READBACK_SENTINEL) else float(value)
+            elif key.startswith("STAT"):
+                row.update(decode_2400_status(value))
+        rows.append(row)
+    return rows
 
 def get_devices_list():
     """
@@ -194,6 +437,8 @@ def get_device(gpib_address, nplc):
     def _construct_by_class_name(res_str: str, class_name: str):
         if class_name == "Keithley6517B":
             return Keithley6517B(res_str, nplc=nplc)
+        if class_name == "Keithley2400":
+            return Keithley2400(res_str, nplc=nplc)
         if class_name == "Keithley6430":
             return Keithley6430(res_str, nplc=nplc)
         if class_name == "Keithley6514":
@@ -371,6 +616,11 @@ class Keithley6517B:
         print("Connection to Keithley 6517B closed.")
 
 class Keithley6430:
+    max_current_range = 105e-3
+    max_current_compliance = 105e-3
+    max_voltage_source_range = 200.0
+    supports_fast_vac = False
+
     def __init__(self, gpib_address='GPIB0::16::INSTR', nplc=1):
         self.rm = pyvisa.ResourceManager()
         self.gpib_address=gpib_address
@@ -394,9 +644,12 @@ class Keithley6430:
         self.output_enabled = False
 
     def set_complicance_current(self, curr):
-        curr = min(max(abs(float(curr)), 1e-12), 105e-3)
-        self.device.write(f":SENS:CURR:PROT {curr};")
+        curr = min(max(abs(float(curr)), 1e-12), float(getattr(self, "max_current_compliance", 105e-3)))
         self.device.write(f":SENS:CURR:RANG {curr};")
+        self.device.write(f":SENS:CURR:PROT {curr};")
+
+    def set_compliance_current(self, curr):
+        self.set_complicance_current(curr)
 
     def clear_buffer(self):
         """Clears the instrument's input buffer."""
@@ -442,8 +695,8 @@ class Keithley6430:
         Set the current range.
         :param range_value: Current range in amps (e.g., 0.01, 0.1, 1).
         """
-        if range_value > 105e-3:
-            range_value = 105e-3
+        if range_value > float(getattr(self, "max_current_range", 105e-3)):
+            range_value = float(getattr(self, "max_current_range", 105e-3))
         self.device.write(f'CURR:RANG {range_value};')
     
     def get_current_range(self):
@@ -523,6 +776,277 @@ class Keithley6430:
         self.device.write('OUTP OFF')  # Turn the output off
         self.device.close()
         print("Connection to Keithley 6430 closed.")
+
+
+class Keithley2400(Keithley6430):
+    max_current_range = 1.05
+    max_current_compliance = 1.05
+    max_voltage_source_range = 200.0
+    supports_fast_vac = True
+
+    def init_device(self, nplc):
+        self.device.write('*CLS;')
+        self.device.write('*RST;')
+        self.device.write(":SENS:FUNC:CONC OFF;")
+        self.device.write(":SOUR:FUNC VOLT;")
+        self.device.write(":SOUR:VOLT:MODE FIX;")
+        self.device.write(":SOUR:VOLT:LEV 0;")
+        self.device.write(":SENS:FUNC 'CURR:DC';")
+        self.device.write(f":SENS:CURR:NPLC {float(nplc)};")
+        self.device.write(":FORM:ELEM VOLT,CURR;")
+        self.source_mode = 'voltage'
+        self.output_enabled = False
+
+    def set_source_mode(self, mode='voltage'):
+        mode = str(mode).strip().lower()
+        if mode == 'current':
+            self.device.write(":SENS:FUNC:CONC OFF;")
+            self.device.write(":SOUR:FUNC CURR;")
+            self.device.write(":SOUR:CURR:MODE FIX;")
+            self.device.write(":SENS:FUNC 'VOLT:DC';")
+            self.device.write(f":SENS:VOLT:NPLC {float(self.nplc)};")
+            self.device.write(":FORM:ELEM VOLT,CURR;")
+            self.device.write(":SOUR:CURR:LEV 0;")
+            self.source_mode = 'current'
+            return
+        self.device.write(":SENS:FUNC:CONC OFF;")
+        self.device.write(":SOUR:FUNC VOLT;")
+        self.device.write(":SOUR:VOLT:MODE FIX;")
+        self.device.write(":SENS:FUNC 'CURR:DC';")
+        self.device.write(f":SENS:CURR:NPLC {float(self.nplc)};")
+        self.device.write(":FORM:ELEM VOLT,CURR;")
+        self.device.write(":SOUR:VOLT:LEV 0;")
+        self.source_mode = 'voltage'
+
+    def close(self):
+        self.set_voltage(0)
+        self.device.write('OUTP OFF')
+        self.device.close()
+        print("Connection to Keithley 2400 closed.")
+
+
+class Keithley2400FastSweepAdapter:
+    def __init__(self, device):
+        if not isinstance(device, Keithley2400):
+            raise ValueError("Fast sweep adapter requires a Keithley 2400 device.")
+        self.device = device
+        self.resource = getattr(device, 'device', None)
+        if self.resource is None:
+            raise RuntimeError("Instrument VISA resource handle unavailable.")
+        self.output_enabled = False
+
+    @property
+    def max_current(self):
+        return float(getattr(self.device, "max_current_compliance", FAST_VAC_NO_COMPLIANCE_CURRENT))
+
+    def _write(self, command):
+        self.resource.write(str(command))
+
+    def _apply_current_profile(self, compliance_current, current_range=None, current_autorange=True, relaxed_current_range=False):
+        effective_compliance = min(max(abs(float(compliance_current)), 1e-12), self.max_current)
+        if relaxed_current_range:
+            self._write(f":SENS:CURR:PROT {self.max_current}")
+            self._write(":SENS:CURR:RANG:AUTO ON")
+            return self.max_current
+
+        self._write(f":SENS:CURR:PROT {effective_compliance}")
+        if current_autorange or current_range is None:
+            self._write(":SENS:CURR:RANG:AUTO ON")
+        else:
+            effective_range = min(max(abs(float(current_range)), 1e-12), self.max_current)
+            self._write(":SENS:CURR:RANG:AUTO OFF")
+            self._write(f":SENS:CURR:RANG {effective_range}")
+        return effective_compliance
+
+    def _prepare_common_voltage_sweep(self, point_count, compliance_current, nplc, source_delay_s, current_range=None, current_autorange=True, relaxed_current_range=False):
+        if int(point_count) <= 0:
+            raise ValueError("Sweep must contain at least one point.")
+        self._write("*CLS")
+        self._write(":ABOR")
+        self._write(":TRAC:CLE")
+        self._write(":SENS:FUNC:CONC OFF")
+        self._write(":FORM:DATA ASC")
+        self._write(":FORM:ELEM VOLT,CURR,TIME,STAT")
+        self._write(":SOUR:FUNC VOLT")
+        self._write(":SOUR:VOLT:MODE FIX")
+        self._write(":SOUR:VOLT:RANG 200")
+        self._write(":SOUR:VOLT:LEV 0")
+        self._write(":SENS:FUNC 'CURR:DC'")
+        self._write(f":SENS:CURR:NPLC {float(nplc)}")
+        self._write(f":SOUR:DEL {max(0.0, float(source_delay_s))}")
+        self._write(":ARM:COUN 1")
+        self._write(f":TRIG:COUN {int(point_count)}")
+        return self._apply_current_profile(
+            compliance_current,
+            current_range=current_range,
+            current_autorange=current_autorange,
+            relaxed_current_range=relaxed_current_range,
+        )
+
+    def configure_voltage_list_sweep(
+        self,
+        points,
+        compliance_current,
+        nplc,
+        source_delay_s,
+        current_range=None,
+        current_autorange=True,
+        relaxed_current_range=False,
+    ):
+        point_values = [_normalize_float_for_path(value) for value in list(points or [])]
+        if len(point_values) > FAST_VAC_LIST_MAX_POINTS:
+            raise ValueError(
+                f"List sweep exceeds {FAST_VAC_LIST_MAX_POINTS} point limit: {len(point_values)}"
+            )
+        applied_compliance = self._prepare_common_voltage_sweep(
+            len(point_values),
+            compliance_current,
+            nplc,
+            source_delay_s,
+            current_range=current_range,
+            current_autorange=current_autorange,
+            relaxed_current_range=relaxed_current_range,
+        )
+        list_text = ",".join(f"{float(value):.12g}" for value in point_values)
+        self._write(":SOUR:VOLT:MODE LIST")
+        self._write(f":SOUR:LIST:VOLT {list_text}")
+        self._write(":SOUR:SWE:RANG BEST")
+        return {
+            "points": point_values,
+            "compliance_current": applied_compliance,
+            "engine": "List",
+        }
+
+    def configure_source_memory_sweep(
+        self,
+        points,
+        compliance_current,
+        nplc,
+        source_delay_s,
+        current_range=None,
+        current_autorange=True,
+        relaxed_current_range=False,
+        holdoff_enabled=False,
+        holdoff_delay_s=0.0,
+    ):
+        point_values = [_normalize_float_for_path(value) for value in list(points or [])]
+        if len(point_values) > FAST_VAC_MEMORY_MAX_POINTS:
+            raise ValueError(
+                f"Source-memory sweep exceeds {FAST_VAC_MEMORY_MAX_POINTS} point limit: {len(point_values)}"
+            )
+        applied_compliance = self._prepare_common_voltage_sweep(
+            len(point_values),
+            compliance_current,
+            nplc,
+            source_delay_s,
+            current_range=current_range,
+            current_autorange=current_autorange,
+            relaxed_current_range=relaxed_current_range,
+        )
+        effective_holdoff = bool(holdoff_enabled) and not bool(relaxed_current_range)
+        holdoff_delay_s = max(0.0, float(holdoff_delay_s))
+        self._write(":SOUR:FUNC MEM")
+        self._write(f":SOUR:MEM:POIN {len(point_values)}")
+        self._write(":SOUR:MEM:STAR 1")
+        self._write(":SOUR:FUNC VOLT")
+        self._write(":SOUR:VOLT:MODE FIX")
+        for index, point in enumerate(point_values, start=1):
+            self._write(f":SOUR:VOLT:LEV {float(point):.12g}")
+            self._write(f":SENS:CURR:RANG:HOLD {'ON' if effective_holdoff else 'OFF'}")
+            self._write(f":SENS:CURR:RANG:HOLD:DEL {holdoff_delay_s:.12g}")
+            self._write(f":SOUR:MEM:SAVE {index}")
+        self._write(":SOUR:FUNC MEM")
+        self._write(f":SOUR:MEM:POIN {len(point_values)}")
+        self._write(":SOUR:MEM:STAR 1")
+        return {
+            "points": point_values,
+            "compliance_current": applied_compliance,
+            "engine": "Source Memory",
+            "holdoff_enabled": effective_holdoff,
+            "holdoff_delay_s": holdoff_delay_s,
+        }
+
+    def run_configured_batch(self, expected_points):
+        expected_points = int(expected_points)
+        if expected_points <= 0:
+            return []
+        try:
+            self._write("OUTP ON")
+            self.output_enabled = True
+            self._write(":READ?")
+            raw = self.resource.read()
+            rows = parse_2400_sweep_readback(raw)
+        finally:
+            self.abort_to_zero(clear_only=False)
+        if len(rows) != expected_points:
+            raise RuntimeError(
+                f"Expected {expected_points} readings from 2400, received {len(rows)}."
+            )
+        return rows
+
+    def execute_batch(
+        self,
+        engine,
+        points,
+        compliance_current,
+        nplc,
+        source_delay_s,
+        current_range=None,
+        current_autorange=True,
+        relaxed_current_range=False,
+        holdoff_enabled=False,
+        holdoff_delay_s=0.0,
+    ):
+        engine_name = _normalized_engine_name(engine)
+        if engine_name == "memory":
+            config = self.configure_source_memory_sweep(
+                points,
+                compliance_current,
+                nplc,
+                source_delay_s,
+                current_range=current_range,
+                current_autorange=current_autorange,
+                relaxed_current_range=relaxed_current_range,
+                holdoff_enabled=holdoff_enabled,
+                holdoff_delay_s=holdoff_delay_s,
+            )
+        else:
+            config = self.configure_voltage_list_sweep(
+                points,
+                compliance_current,
+                nplc,
+                source_delay_s,
+                current_range=current_range,
+                current_autorange=current_autorange,
+                relaxed_current_range=relaxed_current_range,
+            )
+        return self.run_configured_batch(len(config["points"]))
+
+    def abort_to_zero(self, clear_only=True):
+        try:
+            self._write(":ABOR")
+        except Exception:
+            pass
+        try:
+            self._write(":SOUR:FUNC VOLT")
+            self._write(":SOUR:VOLT:MODE FIX")
+            self._write(":SOUR:VOLT:LEV 0")
+        except Exception:
+            pass
+        try:
+            self._write("OUTP OFF")
+        except Exception:
+            pass
+        self.output_enabled = False
+        if clear_only:
+            try:
+                self._write(":TRAC:CLE")
+            except Exception:
+                pass
+            try:
+                self._write("*CLS")
+            except Exception:
+                pass
 
 
 class Keithley6517B_Mock:
@@ -1393,7 +1917,14 @@ class VoltageSourceAdapter:
             return 'smu'
         return None
 
-    def configure(self, voltage_range=None, compliance_current=None, nplc=1.0):
+    def configure(
+        self,
+        voltage_range=None,
+        compliance_current=None,
+        nplc=1.0,
+        current_sense_range=None,
+        current_sense_autorange=None,
+    ):
         if self.kind is None:
             raise ValueError('Selected device cannot source voltage in this mode.')
         if self.kind == 'mock':
@@ -1410,7 +1941,8 @@ class VoltageSourceAdapter:
             self.resource.write(":SOUR:FUNC VOLT")
             self.resource.write(":SOUR:VOLT:MODE FIX")
             if autorange:
-                self.resource.write(f":SOUR:VOLT:RANG {200}")
+                default_voltage_range = float(getattr(self.device, "max_voltage_source_range", 200.0))
+                self.resource.write(f":SOUR:VOLT:RANG {default_voltage_range}")
                 # self.resource.write(":SOUR:VOLT:RANG:AUTO ON")
                 pass
             else:
@@ -1424,9 +1956,14 @@ class VoltageSourceAdapter:
             if compliance_current is not None:
                 try:
                     self.resource.write(f":SENS:CURR:PROT {compliance_current}")
-                    self.resource.write(f":SENS:CURR:RANG {abs(compliance_current)}")
                 except Exception:
                     pass
+            if current_sense_range is not None:
+                self.set_current_sense_range(current_sense_range)
+            elif current_sense_autorange is not None:
+                self.set_current_sense_autorange(current_sense_autorange)
+            elif compliance_current is not None:
+                self.set_current_sense_autorange(True)
             try:
                 self.resource.write(":FORM:ELEM VOLT,CURR")
             except Exception:
@@ -1453,6 +1990,40 @@ class VoltageSourceAdapter:
                 self.resource.write(":FORM:ELEM VOLT,CURR")
             except Exception:
                 self.resource.write(":FORM:ELEM VOLT")
+
+    def set_current_sense_autorange(self, enable=True):
+        if self.kind != 'smu' or self.resource is None:
+            return
+        try:
+            self.resource.write(f":SENS:CURR:RANG:AUTO {'ON' if enable else 'OFF'}")
+        except Exception as exc:
+            action = 'enable' if enable else 'disable'
+            raise RuntimeError(f'Failed to {action} current-sense autorange: {exc}') from exc
+
+    def set_current_sense_range(self, range_value):
+        if self.kind != 'smu' or self.resource is None:
+            return
+        try:
+            parsed_range = min(
+                max(abs(float(range_value)), 1e-12),
+                float(getattr(self.device, "max_current_range", 105e-3)),
+            )
+        except Exception as exc:
+            raise ValueError(f'Invalid current-sense range: {range_value}') from exc
+        self.set_current_sense_autorange(False)
+        try:
+            self.resource.write(f":SENS:CURR:RANG {parsed_range}")
+        except Exception as exc:
+            raise RuntimeError(f'Failed to set current-sense range: {exc}') from exc
+
+    def get_current_sense_range(self):
+        if self.kind != 'smu' or self.resource is None:
+            return np.nan
+        try:
+            self.resource.write(":SENS:CURR:RANG?")
+            return _first_float_from_csv(self.resource.read())
+        except Exception:
+            return np.nan
 
     def set_voltage(self, voltage):
         if self.kind == 'mock':

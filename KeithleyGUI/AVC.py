@@ -11,6 +11,9 @@ from ui_helpers import (
     refresh_device_combos,
     apply_standard_window_style,
     parse_numeric_text,
+    ensure_directory,
+    build_device_metadata,
+    write_json_file,
 )
 import pandas as pd
 import time 
@@ -39,6 +42,7 @@ class AVCRegime(QWidget):
         self.noise_data = []  # For storing I(t) during measurements
         self.n_runs = 2
         self.current_range = 1e-8
+        self.measurement_metadata = {}
         # Setup GUI components
         self.initUI()
         self.direction = 1
@@ -55,6 +59,43 @@ class AVCRegime(QWidget):
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S') 
+
+    def _get_sample_name(self):
+        self.sample_name = self.sample_name_input.text().strip() or self.sample_name.strip() or 'sample'
+        return self.sample_name
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'AVC',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self.sample_name,
+            'device': build_device_metadata(keithley, self.device_address, self.device),
+            'parameters': {
+                'current_min_a': self.current_min,
+                'current_max_a': self.current_max,
+                'current_step_a': self.current_step,
+                'collection_time_ms': self.collection_time,
+                'nplc': self.nplc,
+                'n_runs_requested': self.n_runs,
+                'source_mode': 'current',
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
 
     def initUI(self):
         
@@ -148,7 +189,7 @@ class AVCRegime(QWidget):
         self.voltage_now.setStyleSheet("background-color: lightgray") 
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         button_layout.addWidget(self.start_button)
         # button_layout.addWidget(QLabel('Voltage now: '))
         button_layout.addWidget(self.voltage_now)
@@ -248,6 +289,7 @@ class AVCRegime(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         try:
             self.current_min = parse_numeric_text(self.current_min_input.text(), "Current min")
         except Exception as e:
@@ -273,7 +315,7 @@ class AVCRegime(QWidget):
         self.collection_time = self.collection_time_input.value()
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.device_address_input.currentText()
-        self.sample_name = self.sample_name_input.text()
+        self.sample_name = self._get_sample_name()
         # self.current_range = self.current_range_input.currentText()
         self.direction = 1
         print('Device address: ', self.device_address)
@@ -295,6 +337,7 @@ class AVCRegime(QWidget):
         #     self.device.device.write(f":SENS:CURR:PROT {self.current_range_input.currentText()};")
         self.device.set_source_mode('current')
         self.total_steps = self.estimate_total_steps()
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
         self.timer.start(50)  # Update every 50 ms
@@ -320,8 +363,17 @@ class AVCRegime(QWidget):
         self.voltage_now.setText('0 V')
         self.timer.stop()
         if save and self.measurements:
-            self.make_plot()
-            self.export_to_csv()
+            save_errors = []
+            try:
+                self.export_to_csv()
+            except Exception as exc:
+                save_errors.append(f"Failed to save data:\n{exc}")
+            try:
+                self.make_plot()
+            except Exception as exc:
+                save_errors.append(f"Failed to save plots:\n{exc}")
+            if save_errors:
+                QMessageBox.critical(self, "Save Error", "\n\n".join(save_errors))
         self.direction = 1
 
     def perform_measurement(self):
@@ -406,15 +458,26 @@ class AVCRegime(QWidget):
 
 
     def export_to_csv(self):
-
-        sample_dir = op.join(self.folder, self.date, self.sample_name)
-        if not op.exists(sample_dir):
-            os.makedirs(sample_dir)
-        if not op.exists(op.join(sample_dir, 'data')):
-            os.makedirs(op.join(sample_dir, 'data'))
-        name = f'{self.sample_name}_{self.current_min}V_{self.current_max}V_{self.collection_time}ms'
+        sample_name, _, data_dir = self._get_output_directories('data')
+        name = f'{sample_name}_{self.current_min}V_{self.current_max}V_{self.collection_time}ms'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'AVC_{name}_{self.start_time}.data'), index=False)
+        output_path = op.join(data_dir, f'AVC_{name}_{self.start_time}.data')
+        df.to_csv(output_path, index=False)
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.measurements),
+            'data_columns': list(df.columns),
+            'data_file': output_path,
+            'metadata_file': op.join(data_dir, f'AVC_{name}_{self.start_time}.meta.json'),
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'remaining_runs_counter': self.n_runs,
+        })
+        write_json_file(metadata['metadata_file'], metadata)
         del df
 
 

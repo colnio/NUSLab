@@ -35,6 +35,9 @@ from ui_helpers import (
     refresh_device_combos,
     apply_standard_window_style,
     parse_numeric_text,
+    ensure_directory,
+    build_device_metadata,
+    write_json_file,
 )
 
 class FourProbeFET(QWidget):
@@ -54,6 +57,15 @@ class FourProbeFET(QWidget):
         self.current_gate_index = 0
         self.current_gate_target = 0.0
         self._eval_warning_shown = False
+        self.measurement_metadata = {}
+        self.gate_current_range_setting = 'Auto-range'
+        self.gate_current_range_effective_a = np.nan
+        self.gate_current_range_used_autorange = False
+        self.gate_current_range_overflowed = False
+        self.gate_current_range_should_lock_after_first_point = False
+        self.gate_current_range_lock_settle_ms = 100
+        self.gate_current_range_settle_until_ms = 0
+        self.gate_current_range_status_text = ''
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.perform_measurement)
@@ -68,6 +80,59 @@ class FourProbeFET(QWidget):
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
 
         self.init_ui()
+
+    def _get_sample_name(self):
+        return self.sample_name_input.text().strip() or 'sample'
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'FourProbeFET',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self._get_sample_name(),
+            'devices': {
+                'source_drain': build_device_metadata(keithley, self.sd_combo.currentText(), self.sd_device),
+                'probe_voltmeter': build_device_metadata(keithley, self.probe_combo.currentText(), self.probe_device),
+                'gate': build_device_metadata(keithley, self.gate_combo.currentText(), self.gate_device),
+            },
+            'parameters': {
+                'source_drain_voltage_v': self.sd_voltage_setpoint,
+                'source_drain_compliance_current_a': parse_numeric_text(self.sd_compliance_input.text(), 'Source-drain compliance current'),
+                'gate_voltage_min_v': parse_numeric_text(self.gate_min_input.text(), 'Gate Vmin'),
+                'gate_voltage_max_v': parse_numeric_text(self.gate_max_input.text(), 'Gate Vmax'),
+                'gate_voltage_step_v': parse_numeric_text(self.gate_step_input.text(), 'Gate Vstep'),
+                'gate_compliance_current_a': parse_numeric_text(self.gate_compliance_input.text(), 'Gate compliance current'),
+                'collection_time_ms': self.collection_time,
+                'nplc': self.nplc_combo.currentText(),
+                'source_drain_voltage_range_setting': self.sd_voltage_range_combo.currentText(),
+                'probe_voltage_range_setting': self.probe_voltage_range_combo.currentText(),
+                'gate_voltage_range_setting': self.gate_voltage_range_combo.currentText(),
+                'gate_current_range_setting': self.gate_current_range_setting,
+                'gate_current_range_lock_settle_ms': self.gate_current_range_lock_settle_ms,
+                'n_runs_requested': self.nruns_input.value(),
+                'average_over_interval': self.average_checkbox.isChecked(),
+            },
+            'diagnostics': {
+                'gate_current_range_effective_a': self._finite_or_none(self.gate_current_range_effective_a),
+                'gate_current_range_used_autorange_to_choose_initial_range': self.gate_current_range_used_autorange,
+                'gate_current_range_overflowed': self.gate_current_range_overflowed,
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
 
     def init_ui(self):
         self.setWindowTitle('Keithley Four-Probe FET')
@@ -128,6 +193,11 @@ class FourProbeFET(QWidget):
         self.gate_compliance_input = QLineEdit("1e-6")
         self.gate_compliance_input.setMaximumWidth(field_width)
 
+        gate_current_ranges = ['Auto-range'] + list((2 * 10.0 ** np.arange(-12.0, -1.0, 1.0)).astype(str))
+        self.gate_current_range_combo = QComboBox()
+        self.gate_current_range_combo.addItems(gate_current_ranges)
+        self.gate_current_range_combo.setMaximumWidth(110)
+
         self.probe_voltage_range_combo = QComboBox()
         self.probe_voltage_range_combo.addItems(['Auto-range', '0.002', '0.02', '0.2', '2', '20', '200'])
         self.probe_voltage_range_combo.setMaximumWidth(110)
@@ -178,6 +248,8 @@ class FourProbeFET(QWidget):
         row += 1
         control_grid.addWidget(QLabel('Avg ms'), row, 0)
         control_grid.addWidget(self.collection_time_input, row, 1)
+        control_grid.addWidget(QLabel('Probe Range'), row, 2)
+        control_grid.addWidget(self.probe_voltage_range_combo, row, 3)
 
         row += 1
         control_grid.addWidget(QLabel('Gate Vmin'), row, 0)
@@ -192,8 +264,8 @@ class FourProbeFET(QWidget):
         control_grid.addWidget(self.gate_compliance_input, row, 1)
         control_grid.addWidget(QLabel('Gate Range'), row, 2)
         control_grid.addWidget(self.gate_voltage_range_combo, row, 3)
-        control_grid.addWidget(QLabel('Probe Range'), row, 4)
-        control_grid.addWidget(self.probe_voltage_range_combo, row, 5)
+        control_grid.addWidget(QLabel('Gate I Range'), row, 4)
+        control_grid.addWidget(self.gate_current_range_combo, row, 5)
 
         row += 1
         control_grid.addWidget(self.average_checkbox, row, 0, 1, 6)
@@ -206,7 +278,7 @@ class FourProbeFET(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         self.stop_button.setEnabled(False)
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
@@ -246,6 +318,12 @@ class FourProbeFET(QWidget):
         self.gate_plot.setLabel('bottom', 'Gate voltage', units='V')
         self.gate_plot.getAxis('left').enableAutoSIPrefix(True)
         self.gate_plot.getAxis('bottom').enableAutoSIPrefix(True)
+        self.resistance_plot = self.plot_widget.addPlot(title='Resistance vs Gate Voltage')
+        self.resistance_plot.showGrid(x=True, y=True, alpha=0.12)
+        self.resistance_plot.setLabel('left', 'Resistance', units='Ohm')
+        self.resistance_plot.setLabel('bottom', 'Gate voltage', units='V')
+        self.resistance_plot.getAxis('left').enableAutoSIPrefix(True)
+        self.resistance_plot.getAxis('bottom').enableAutoSIPrefix(True)
         layout.addWidget(self.plot_widget)
 
         self.status_label = QLabel('')
@@ -285,26 +363,19 @@ class FourProbeFET(QWidget):
             self.refresh_button.setEnabled(True)
 
     def estimate_total_steps(self):
-        if not self.gate_values:
-            return 1
-        idx = 0
-        direction = 1
-        runs = int(self.gate_remaining_runs)
-        steps = 0
-        max_iter = 5_000_000
-        while steps < max_iter:
-            steps += 1
-            next_index = idx + direction
-            if next_index >= len(self.gate_values) or next_index < 0:
-                direction *= -1
-                runs -= 1
-                if runs <= 0:
-                    break
-                next_index = idx + direction
-                if next_index >= len(self.gate_values) or next_index < 0:
-                    break
-            idx = next_index
-        return max(1, steps)
+        return max(1, len(self.gate_values))
+
+    @staticmethod
+    def _calculate_resistance(probe_voltage, source_drain_current):
+        if (
+            probe_voltage is None
+            or source_drain_current is None
+            or np.isnan(probe_voltage)
+            or np.isnan(source_drain_current)
+            or np.isclose(source_drain_current, 0.0, atol=1e-18, rtol=1e-12)
+        ):
+            return np.nan
+        return float(abs(probe_voltage / source_drain_current))
 
     def _eval_numeric_field(self, widget, field_name):
         text = widget.text().strip()
@@ -327,6 +398,69 @@ class FourProbeFET(QWidget):
                 return float(selected)
             except Exception:
                 return None
+
+    def _parse_current_range(self, combo, field_name):
+        selected = combo.currentText()
+        if selected == 'Auto-range':
+            return None
+        try:
+            return parse_numeric_text(selected, field_name)
+        except Exception as exc:
+            raise ValueError(f"Could not evaluate {field_name}: {selected}") from exc
+
+    @staticmethod
+    def _finite_or_none(value):
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        return numeric if np.isfinite(numeric) else None
+
+    @staticmethod
+    def _format_value(value):
+        return 'n/a' if value is None or np.isnan(value) else f'{value:.3e}'
+
+    def _measurement_status_text(self, suffix=''):
+        base = (
+            f"Gate target {self._format_value(self.current_gate_target)} V | "
+            f"Vsd set {self._format_value(self.sd_voltage_setpoint)} V"
+        )
+        extra = f"{self.gate_current_range_status_text}{suffix}"
+        return f"{base}{extra}"
+
+    def _lock_gate_current_range_after_first_point(self):
+        if not self.gate_current_range_should_lock_after_first_point or self.gate_adapter is None:
+            return False
+        effective_range = self.gate_adapter.get_current_sense_range()
+        if not np.isfinite(effective_range) or effective_range <= 0:
+            raise RuntimeError("Could not read the effective gate current-sense range in auto mode.")
+        self.gate_adapter.set_current_sense_range(effective_range)
+        self.gate_current_range_effective_a = float(effective_range)
+        self.gate_current_range_should_lock_after_first_point = False
+        self.gate_current_range_used_autorange = True
+        self.gate_current_range_status_text = f" | Gate I range locked {effective_range:.3e} A"
+        return True
+
+    def _gate_current_range_overflow_message(self, gate_currents):
+        if self.gate_adapter is None or self.gate_adapter.kind != 'smu':
+            return None
+        if not np.isfinite(self.gate_current_range_effective_a) or self.gate_current_range_effective_a <= 0:
+            return None
+        observed = [
+            abs(float(value))
+            for value in gate_currents
+            if value is not None and np.isfinite(value)
+        ]
+        if not observed:
+            return None
+        if max(observed) > self.gate_current_range_effective_a * (1 + 1e-6):
+            self.gate_current_range_overflowed = True
+            return (
+                f"Gate current exceeded the locked gate current-sense range "
+                f"({self.gate_current_range_effective_a:.3e} A).\n\n"
+                "Pick a wider Gate I Range or rerun with Gate I Range set to Auto-range."
+            )
+        return None
 
     def _resolve_device(self, text, nplc):
         if text == 'Mock':
@@ -376,6 +510,7 @@ class FourProbeFET(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         try:
             sd_voltage = self._eval_numeric_field(self.sd_voltage_input, 'Source-drain voltage')
             sd_compliance = self._eval_numeric_field(self.sd_compliance_input, 'Source-drain compliance current')
@@ -383,6 +518,7 @@ class FourProbeFET(QWidget):
             gate_max = self._eval_numeric_field(self.gate_max_input, 'Gate Vmax')
             gate_step = self._eval_numeric_field(self.gate_step_input, 'Gate Vstep')
             gate_compliance = self._eval_numeric_field(self.gate_compliance_input, 'Gate compliance current')
+            gate_current_range = self._parse_current_range(self.gate_current_range_combo, 'Gate current range')
         except ValueError as exc:
             QMessageBox.critical(self, "Error", str(exc))
             return
@@ -445,11 +581,20 @@ class FourProbeFET(QWidget):
 
         try:
             self.gate_adapter = keithley.VoltageSourceAdapter(self.gate_device)
-            # self.gate_adapter.device.write()
+            gate_current_autorange = None
+            gate_current_sense_range = None
+            if self.gate_adapter.kind == 'smu':
+                if gate_current_range is None:
+                    gate_current_autorange = True
+                else:
+                    gate_current_sense_range = gate_current_range
+                    gate_current_autorange = False
             self.gate_adapter.configure(
                 voltage_range=self._parse_voltage_range(self.gate_voltage_range_combo),
                 compliance_current=gate_compliance,
                 nplc=float(nplc_text),
+                current_sense_range=gate_current_sense_range,
+                current_sense_autorange=gate_current_autorange,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to configure gate device: {exc}")
@@ -478,6 +623,26 @@ class FourProbeFET(QWidget):
         self.gate_remaining_runs = self.nruns_input.value()
         self.current_gate_index = 0
         self.current_gate_target = self.gate_values[0]
+        self.gate_current_range_setting = self.gate_current_range_combo.currentText()
+        self.gate_current_range_effective_a = np.nan
+        self.gate_current_range_used_autorange = False
+        self.gate_current_range_overflowed = False
+        self.gate_current_range_should_lock_after_first_point = False
+        self.gate_current_range_settle_until_ms = 0
+        self.gate_current_range_status_text = ''
+        if self.gate_adapter.kind == 'smu':
+            if gate_current_range is None:
+                self.gate_current_range_should_lock_after_first_point = True
+                self.gate_current_range_status_text = " | Gate I range auto (pending lock)"
+            else:
+                effective_gate_range = self.gate_adapter.get_current_sense_range()
+                if np.isfinite(effective_gate_range) and effective_gate_range > 0:
+                    self.gate_current_range_effective_a = float(effective_gate_range)
+                else:
+                    self.gate_current_range_effective_a = float(abs(gate_current_range))
+                self.gate_current_range_status_text = (
+                    f" | Gate I range fixed {self.gate_current_range_effective_a:.3e} A"
+                )
         try:
             self.gate_adapter.set_voltage(self.current_gate_target)
         except Exception as exc:
@@ -497,15 +662,17 @@ class FourProbeFET(QWidget):
         self.iv_plot.clear()
         self.probe_plot.clear()
         self.gate_plot.clear()
+        self.resistance_plot.clear()
 
         self.elapsed_timer.start()
         self.timer.start(max(50, int(self.collection_time / 5)))
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.status_label.setText('Measurement running...')
         self.total_steps = self.estimate_total_steps()
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
+        self.status_label.setText(self._measurement_status_text(" | Measurement running"))
 
     def cleanup_devices(self):
         if self.sd_adapter:
@@ -522,6 +689,14 @@ class FourProbeFET(QWidget):
         if not (self.sd_adapter and self.probe_adapter and self.gate_adapter):
             self.stop_measurement(save=False)
             return
+        if self.gate_current_range_settle_until_ms:
+            remaining = self.gate_current_range_settle_until_ms - self.elapsed_timer.elapsed()
+            if remaining > 0:
+                self.status_label.setText(
+                    self._measurement_status_text(f" | waiting {int(max(0, remaining))} ms after Gate I range lock")
+                )
+                return
+            self.gate_current_range_settle_until_ms = 0
 
         try:
             self.sd_adapter.set_voltage(self.sd_voltage_setpoint)
@@ -568,6 +743,7 @@ class FourProbeFET(QWidget):
         mean_probe_voltage = average_or_last(probe_voltages)
         mean_gate_voltage = average_or_last(gate_voltages)
         mean_gate_current = average_or_last(gate_currents)
+        locked_this_point = False
 
         self.measurements.append({
             'SourceDrainVoltage': mean_sd_voltage,
@@ -578,14 +754,32 @@ class FourProbeFET(QWidget):
             'Direction': self.gate_direction,
             'Timestamp': time.time(),
         })
+        if self.gate_current_range_should_lock_after_first_point:
+            try:
+                locked_this_point = self._lock_gate_current_range_after_first_point()
+            except Exception as exc:
+                self.stop_measurement(save=True)
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to lock the gate current-sense range after the first point:\n{exc}",
+                )
+                return
+        if not locked_this_point:
+            overflow_message = self._gate_current_range_overflow_message(gate_currents)
+            if overflow_message:
+                self.stop_measurement(save=True)
+                QMessageBox.critical(self, "Error", overflow_message)
+                return
 
-        def fmt(val):
-            return 'n/a' if val is None or np.isnan(val) else f'{val:.3e}'
-
-        self.sd_status_label.setText(f'Ids: {fmt(mean_sd_current)} A @ Vsd {fmt(mean_sd_voltage)} V')
-        self.probe_status_label.setText(f'Vprobe: {fmt(mean_probe_voltage)} V')
-        self.gate_status_label.setText(f'Ig: {fmt(mean_gate_current)} A @ Vg {fmt(mean_gate_voltage)} V')
-        self.status_label.setText(f'Gate target {fmt(self.current_gate_target)} V | Vsd set {fmt(self.sd_voltage_setpoint)} V')
+        self.sd_status_label.setText(
+            f'Ids: {self._format_value(mean_sd_current)} A @ Vsd {self._format_value(mean_sd_voltage)} V'
+        )
+        self.probe_status_label.setText(f'Vprobe: {self._format_value(mean_probe_voltage)} V')
+        self.gate_status_label.setText(
+            f'Ig: {self._format_value(mean_gate_current)} A @ Vg {self._format_value(mean_gate_voltage)} V'
+        )
+        self.status_label.setText(self._measurement_status_text())
 
         self.update_plots()
         self.completed_steps += 1
@@ -595,6 +789,11 @@ class FourProbeFET(QWidget):
         )
         if not self._advance_gate():
             self.stop_measurement(save=True)
+            return
+        if locked_this_point:
+            self.gate_current_range_settle_until_ms = (
+                self.elapsed_timer.elapsed() + self.gate_current_range_lock_settle_ms
+            )
 
     def _advance_gate(self):
         next_index = self.current_gate_index + 1
@@ -631,12 +830,12 @@ class FourProbeFET(QWidget):
         self.stop_button.setEnabled(False)
         self.status_label.setText('Measurement stopped.')
 
-        # if save and self.measurements:
-        try:
-            self.export_to_csv()
-            self.make_plots()
-        except Exception as exc:
-            QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
+        if save and self.measurements:
+            try:
+                self.export_to_csv()
+                self.make_plots()
+            except Exception as exc:
+                QMessageBox.warning(self, "Warning", f"Failed to save data: {exc}")
 
         self.sd_adapter = None
         self.gate_adapter = None
@@ -685,6 +884,28 @@ class FourProbeFET(QWidget):
         else:
             self.gate_plot.clear()
 
+        resistance_pairs = []
+        for m in self.measurements:
+            gate_voltage = m.get('GateVoltage')
+            resistance = self._calculate_resistance(
+                m.get('ProbeVoltage'),
+                m.get('SourceDrainCurrent'),
+            )
+            if (
+                gate_voltage is None
+                or np.isnan(gate_voltage)
+                or np.isnan(resistance)
+            ):
+                continue
+            resistance_pairs.append((gate_voltage, resistance))
+        if resistance_pairs:
+            xs = [p[0] for p in resistance_pairs]
+            ys = [p[1] for p in resistance_pairs]
+            self.resistance_plot.plot(xs, ys, pen=pg.mkPen(color=(128, 64, 0), width=2), clear=True)
+            self.resistance_plot.plot(xs, ys, pen=None, symbol='o', symbolSize=4, symbolBrush=(128, 64, 0, 160))
+        else:
+            self.resistance_plot.clear()
+
     def get_dataframe(self):
         rows = []
         for m in self.measurements:
@@ -700,14 +921,37 @@ class FourProbeFET(QWidget):
         return pd.DataFrame(rows)
 
     def export_to_csv(self):
-        sample_name = self.sample_name_input.text() or 'sample'
-        sample_dir = op.join(self.folder, self.date, sample_name)
-        data_dir = op.join(sample_dir, 'data')
-        if not op.exists(data_dir):
-            os.makedirs(data_dir, exist_ok=True)
+        sample_name, _, data_dir = self._get_output_directories('data')
         df = self.get_dataframe()
         name = f'{sample_name}_FETFProbe_{self.start_time}'
-        df.to_csv(op.join(data_dir, f'FourProbeFET_{name}.data'), index=False)
+        output_path = op.join(data_dir, f'FourProbeFET_{name}.data')
+        df.to_csv(output_path, index=False)
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.measurements),
+            'data_columns': list(df.columns),
+            'data_file': output_path,
+            'metadata_file': op.join(data_dir, f'FourProbeFET_{name}.meta.json'),
+        })
+        metadata['parameters'] = dict(metadata.get('parameters', {}))
+        metadata['parameters'].update({
+            'gate_current_range_setting': self.gate_current_range_setting,
+            'gate_current_range_lock_settle_ms': self.gate_current_range_lock_settle_ms,
+        })
+        metadata['diagnostics'] = dict(metadata.get('diagnostics', {}))
+        metadata['diagnostics'].update({
+            'gate_current_range_effective_a': self._finite_or_none(self.gate_current_range_effective_a),
+            'gate_current_range_used_autorange_to_choose_initial_range': self.gate_current_range_used_autorange,
+            'gate_current_range_overflowed': self.gate_current_range_overflowed,
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'current_gate_index': self.current_gate_index,
+        })
+        write_json_file(metadata['metadata_file'], metadata)
 
     def make_plots(self):
         sample_name = self.sample_name_input.text() or 'sample'
@@ -742,9 +986,27 @@ class FourProbeFET(QWidget):
         plt.savefig(op.join(plot_dir, f'FourProbeFET_Gate_{name}.png'), dpi=300)
         fig3.clf()
 
+        source_currents = df['SourceDrainCurrent'].to_numpy(dtype=float, copy=True)
+        probe_voltages = df['ProbeVoltage'].to_numpy(dtype=float, copy=True)
+        resistance = np.full(source_currents.shape, np.nan, dtype=float)
+        valid = (
+            ~np.isnan(source_currents)
+            & ~np.isnan(probe_voltages)
+            & ~np.isclose(source_currents, 0.0, atol=1e-18, rtol=1e-12)
+        )
+        resistance[valid] = np.abs(probe_voltages[valid] / source_currents[valid])
+        fig4 = plt.figure(figsize=(10, 6), dpi=300)
+        plt.plot(df['GateVoltage'], resistance, 'o-', markersize=3)
+        plt.xlabel('Gate Voltage (V)')
+        plt.ylabel('Resistance (Ohm)')
+        plt.grid(True)
+        plt.savefig(op.join(plot_dir, f'FourProbeFET_Resistance_{name}.png'), dpi=300)
+        fig4.clf()
+
         matplotlib.pyplot.close(fig1)
         matplotlib.pyplot.close(fig2)
         matplotlib.pyplot.close(fig3)
+        matplotlib.pyplot.close(fig4)
         plt.close('all')
         gc.collect()
 

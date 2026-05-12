@@ -9,6 +9,9 @@ from ui_helpers import (
     refresh_device_combos,
     apply_standard_window_style,
     parse_numeric_text,
+    ensure_directory,
+    build_device_metadata,
+    write_json_file,
 )
 import pandas as pd
 import time 
@@ -43,6 +46,7 @@ class PulsesRegime(QWidget):
         self.i_read_reset = []  # For storing I(t) during measurements
         self.n_runs = 2
         self.current_range = 1e-8
+        self.measurement_metadata = {}
         # Setup GUI components
         self.initUI()
         # self.direction = 1
@@ -61,6 +65,43 @@ class PulsesRegime(QWidget):
         if op.exists(op.join(self.folder, self.date)) == False:
             os.makedirs(op.join(self.folder, self.date))
         self.start_time = datetime.datetime.today().strftime('%Y-%m-%d %H-%M-%S')
+
+    def _get_sample_name(self):
+        self.sample_name = self.sample_name_input.text().strip() or self.sample_name.strip() or 'sample'
+        return self.sample_name
+
+    def _get_output_directories(self, leaf_dir=None):
+        if not self.folder:
+            raise RuntimeError("No output folder selected.")
+        date_dir = ensure_directory(op.join(self.folder, self.date), "date")
+        sample_name = self._get_sample_name()
+        sample_dir = ensure_directory(op.join(date_dir, sample_name), f"sample '{sample_name}'")
+        if leaf_dir is None:
+            return sample_name, sample_dir
+        leaf_path = ensure_directory(op.join(sample_dir, leaf_dir), leaf_dir)
+        return sample_name, sample_dir, leaf_path
+
+    def _capture_measurement_metadata(self):
+        return {
+            'measurement_type': 'PULSES',
+            'start_time': self.start_time,
+            'date_folder': self.date,
+            'base_folder': self.folder,
+            'sample_name_at_start': self.sample_name,
+            'device': build_device_metadata(keithley, self.device_address, self.device),
+            'parameters': {
+                'v_set_v': self.v_set,
+                'v_read_set_v': self.v_read_set,
+                'v_reset_v': self.v_reset,
+                'v_read_reset_v': self.v_read_reset,
+                'compliance_current_a': self.compliance_current,
+                'n_runs_requested': self.n_runs,
+                'nplc': self.nplc,
+            },
+            'progress': {
+                'estimated_total_steps': self.total_steps,
+            },
+        }
 
     def initUI(self):
         
@@ -143,7 +184,7 @@ class PulsesRegime(QWidget):
         self.start_button.clicked.connect(self.start_measurement)
         self.stop_button = QPushButton('Stop Measurement')
         self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_measurement)
+        self.stop_button.clicked.connect(lambda _checked=False: self.stop_measurement())
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
@@ -217,6 +258,7 @@ class PulsesRegime(QWidget):
     def start_measurement(self):
         if self.timer.isActive():
             return
+        self.measurement_metadata = {}
         self.v_set = self.voltage_set.value()
         self.v_read_set = self.voltage_read_set.value()
         self.v_reset = self.voltage_reset.value()
@@ -228,7 +270,7 @@ class PulsesRegime(QWidget):
             return
         self.n_runs = int(self.nruns_input.value())
         self.device_address = self.device_address_input.currentText()
-        self.sample_name = self.sample_name_input.text()
+        self.sample_name = self._get_sample_name()
         self.nplc = self.nplc_input.currentText()
         print('Device address: ', self.device_address)
         self.device = keithley.get_device(self.device_address, nplc=self.nplc)
@@ -249,6 +291,7 @@ class PulsesRegime(QWidget):
         if type(self.device) == keithley.Keithley6517B:
             self.device.set_voltage_range(max(abs(self.v_set), abs(self.v_reset)))
         self.total_steps = max(1, int(self.n_runs))
+        self.measurement_metadata = self._capture_measurement_metadata()
         self.completed_steps = 0
         self.progress_tracker.start(self.total_steps)
         self.timer.start(100)  # Update every 100 ms
@@ -277,8 +320,17 @@ class PulsesRegime(QWidget):
                 self.device = None
         self.timer.stop()
         if save and self.i_set:
-            self.make_plot()
-            self.export_to_csv()
+            save_errors = []
+            try:
+                self.export_to_csv()
+            except Exception as exc:
+                save_errors.append(f"Failed to save data:\n{exc}")
+            try:
+                self.make_plot()
+            except Exception as exc:
+                save_errors.append(f"Failed to save plots:\n{exc}")
+            if save_errors:
+                QMessageBox.critical(self, "Save Error", "\n\n".join(save_errors))
 
     def perform_measurement(self):
         # SET
@@ -344,15 +396,26 @@ class PulsesRegime(QWidget):
 
 
     def export_to_csv(self):
-
-        sample_dir = op.join(self.folder, self.date, self.sample_name)
-        if not op.exists(sample_dir):
-            os.makedirs(sample_dir)
-        if not op.exists(op.join(sample_dir, 'data')):
-            os.makedirs(op.join(sample_dir, 'data'))
-        name = f'{self.sample_name}_SET{self.v_set}V_READ{self.v_read_set}V_RESET{self.v_reset}V_READ_RESET{self.v_read_reset}V_{self.nruns_input.value()}RUNS'
+        sample_name, _, data_dir = self._get_output_directories('data')
+        name = f'{sample_name}_SET{self.v_set}V_READ{self.v_read_set}V_RESET{self.v_reset}V_READ_RESET{self.v_read_reset}V_{self.nruns_input.value()}RUNS'
         df = self.get_pandas_data()
-        df.to_csv(op.join(sample_dir, 'data', f'PULSES_{name}_{self.start_time}.data'), index=False)
+        output_path = op.join(data_dir, f'PULSES_{name}_{self.start_time}.data')
+        df.to_csv(output_path, index=False)
+        metadata = dict(self.measurement_metadata) if self.measurement_metadata else self._capture_measurement_metadata()
+        metadata.update({
+            'sample_name_at_save': sample_name,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'measurement_count': len(self.i_set),
+            'data_columns': list(df.columns),
+            'data_file': output_path,
+            'metadata_file': op.join(data_dir, f'PULSES_{name}_{self.start_time}.meta.json'),
+        })
+        metadata['progress'] = dict(metadata.get('progress', {}))
+        metadata['progress'].update({
+            'completed_steps': self.completed_steps,
+            'remaining_runs_counter': self.n_runs,
+        })
+        write_json_file(metadata['metadata_file'], metadata)
 
 
     def get_pandas_data(self):
