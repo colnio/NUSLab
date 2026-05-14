@@ -172,3 +172,5 @@ sampleDB/uploads/*
 sampleDB/sampleDB
 *ipynb
 *png
+docs/2002-900-01F_Aug_2022_User.pdf
+.gitignore

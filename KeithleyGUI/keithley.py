@@ -327,6 +327,212 @@ def plan_fast_vac_batches(
     return batches
 
 
+def _sanitize_pulse_label(label, role, fallback_index):
+    text = str(label or "").strip()
+    if text:
+        return text
+    role_text = str(role or "").strip().upper()
+    if role_text:
+        return role_text
+    return f"SEG{int(fallback_index)}"
+
+
+def pulse_point_period_ms(nplc, source_delay_ms):
+    nplc = max(0.0, float(nplc))
+    source_delay_ms = max(0.0, float(source_delay_ms))
+    integration_ms = nplc * 20.0
+    return max(1e-6, integration_ms + source_delay_ms)
+
+
+def pulse_points_for_dwell(dwell_ms, point_period_ms):
+    dwell_ms = max(0.0, float(dwell_ms))
+    point_period_ms = float(point_period_ms)
+    if point_period_ms <= 0:
+        raise ValueError("Point period must be positive.")
+    return max(1, int(np.floor(dwell_ms / point_period_ms)))
+
+
+def normalize_pulse_sequence(sequence_rows):
+    rows = list(sequence_rows or [])
+    normalized = []
+    active_index = 0
+    for raw_index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"Sequence row {raw_index} is invalid.")
+        enabled = bool(row.get("enabled", True))
+        if not enabled:
+            continue
+        active_index += 1
+        role = str(row.get("role", "PULSE") or "PULSE").strip().upper()
+        normalized.append({
+            "active_index": active_index,
+            "source_row_index": raw_index,
+            "label": _sanitize_pulse_label(row.get("label"), role, active_index),
+            "role": role,
+            "voltage": float(row.get("voltage", 0.0)),
+            "dwell_ms": max(0.0, float(row.get("dwell_ms", 0.0))),
+            "enabled": True,
+        })
+    if not normalized:
+        raise ValueError("At least one enabled pulse row is required.")
+    return normalized
+
+
+def plan_pulse_cycle_batches(
+    sequence_rows,
+    baseline_voltage,
+    baseline_dwell_ms,
+    source_delay_ms,
+    nplc,
+    memory_limit=FAST_VAC_MEMORY_MAX_POINTS,
+):
+    normalized_rows = normalize_pulse_sequence(sequence_rows)
+    baseline_voltage = _normalize_float_for_path(baseline_voltage)
+    baseline_dwell_ms = max(0.0, float(baseline_dwell_ms))
+    source_delay_ms = max(0.0, float(source_delay_ms))
+    point_period_ms = pulse_point_period_ms(nplc, source_delay_ms)
+    memory_limit = int(memory_limit)
+    if memory_limit <= 0:
+        raise ValueError("Memory limit must be positive.")
+
+    segments = []
+    atomic_units = []
+    segment_index = 0
+
+    def _make_segment(label, role, voltage, dwell_ms, is_baseline):
+        nonlocal segment_index
+        segment_index += 1
+        return {
+            "segment_index": segment_index,
+            "segment_label": str(label),
+            "segment_role": str(role),
+            "is_baseline": bool(is_baseline),
+            "voltage": _normalize_float_for_path(voltage),
+            "dwell_ms": max(0.0, float(dwell_ms)),
+            "desired_point_count": pulse_points_for_dwell(dwell_ms, point_period_ms),
+            "point_count": 0,
+        }
+
+    for row in normalized_rows:
+        baseline_segment = _make_segment("BASELINE", "BASELINE", baseline_voltage, baseline_dwell_ms, True)
+        pulse_segment = _make_segment(row["label"], row["role"], row["voltage"], row["dwell_ms"], False)
+        segments.extend([baseline_segment, pulse_segment])
+        atomic_units.append({
+            "segments": [baseline_segment, pulse_segment],
+            "point_count": baseline_segment["point_count"] + pulse_segment["point_count"],
+        })
+
+    final_baseline = _make_segment("BASELINE", "BASELINE", baseline_voltage, baseline_dwell_ms, True)
+    segments.append(final_baseline)
+    atomic_units[-1]["segments"].append(final_baseline)
+    atomic_units[-1]["point_count"] += final_baseline["point_count"]
+
+    for unit in atomic_units:
+        desired_total = sum(int(segment["desired_point_count"]) for segment in unit["segments"])
+        if desired_total <= memory_limit:
+            for segment in unit["segments"]:
+                segment["point_count"] = int(segment["desired_point_count"])
+            unit["point_count"] = int(desired_total)
+            continue
+
+        segment_count = len(unit["segments"])
+        minimum_required = segment_count
+        if minimum_required > memory_limit:
+            pulse_label = next(
+                (segment["segment_label"] for segment in unit["segments"] if not segment["is_baseline"]),
+                "PULSE",
+            )
+            raise ValueError(
+                f"Pulse segment '{pulse_label}' plus baseline requires at least "
+                f"{minimum_required} points, exceeding the source-memory limit of {memory_limit}."
+            )
+
+        scaled_counts = [1] * segment_count
+        available = memory_limit - minimum_required
+        extras = [max(0, int(segment["desired_point_count"]) - 1) for segment in unit["segments"]]
+        total_extras = sum(extras)
+        if total_extras > 0 and available > 0:
+            proportional = [int(np.floor(extra * available / total_extras)) for extra in extras]
+            used = sum(proportional)
+            remainders = [
+                (extra * available / total_extras) - proportional[index]
+                for index, extra in enumerate(extras)
+            ]
+            leftover = available - used
+            order = sorted(range(segment_count), key=lambda idx: remainders[idx], reverse=True)
+            for index in range(segment_count):
+                scaled_counts[index] += proportional[index]
+            for index in order:
+                if leftover <= 0:
+                    break
+                if extras[index] > proportional[index]:
+                    scaled_counts[index] += 1
+                    leftover -= 1
+
+        for segment, count in zip(unit["segments"], scaled_counts):
+            segment["point_count"] = max(1, int(count))
+        unit["point_count"] = sum(int(segment["point_count"]) for segment in unit["segments"])
+
+    batches = []
+    current_batch_units = []
+    current_count = 0
+    for unit in atomic_units:
+        unit_count = int(unit["point_count"])
+        if current_batch_units and current_count + unit_count > memory_limit:
+            batches.append({
+                "batch_index": len(batches) + 1,
+                "units": list(current_batch_units),
+                "point_count": int(current_count),
+            })
+            current_batch_units = []
+            current_count = 0
+        current_batch_units.append(unit)
+        current_count += unit_count
+    if current_batch_units:
+        batches.append({
+            "batch_index": len(batches) + 1,
+            "units": list(current_batch_units),
+            "point_count": int(current_count),
+        })
+
+    planned_batches = []
+    for batch in batches:
+        points = []
+        point_templates = []
+        for unit in batch["units"]:
+            for segment in unit["segments"]:
+                point_count = int(segment["point_count"])
+                points.extend([segment["voltage"]] * point_count)
+                for point_index in range(1, point_count + 1):
+                    point_templates.append({
+                        "SegmentIndex": int(segment["segment_index"]),
+                        "SegmentLabel": str(segment["segment_label"]),
+                        "SegmentRole": str(segment["segment_role"]),
+                        "PointIndexInSegment": int(point_index),
+                        "IsBaseline": bool(segment["is_baseline"]),
+                        "Voltage": float(segment["voltage"]),
+                    })
+        planned_batches.append({
+            "batch_index": int(batch["batch_index"]),
+            "points": points,
+            "point_templates": point_templates,
+            "expected_points": len(points),
+        })
+
+    return {
+        "memory_limit": memory_limit,
+        "source_delay_ms": source_delay_ms,
+        "nplc": float(nplc),
+        "point_period_ms": point_period_ms,
+        "baseline_voltage": baseline_voltage,
+        "baseline_dwell_ms": baseline_dwell_ms,
+        "sequence_rows": normalized_rows,
+        "segments": segments,
+        "batches": planned_batches,
+        "total_points": sum(int(batch["expected_points"]) for batch in planned_batches),
+    }
+
+
 def decode_2400_status(status_value):
     try:
         raw_status = int(round(float(status_value)))
@@ -966,7 +1172,24 @@ class Keithley2400FastSweepAdapter:
             "holdoff_delay_s": holdoff_delay_s,
         }
 
-    def run_configured_batch(self, expected_points):
+    def _hold_output_level(self, voltage=0.0):
+        try:
+            self._write(":ABOR")
+        except Exception:
+            pass
+        try:
+            self._write(":SOUR:FUNC VOLT")
+            self._write(":SOUR:VOLT:MODE FIX")
+            self._write(f":SOUR:VOLT:LEV {float(voltage):.12g}")
+        except Exception:
+            pass
+        try:
+            self._write("OUTP ON")
+        except Exception:
+            pass
+        self.output_enabled = True
+
+    def run_configured_batch(self, expected_points, keep_output_on=False, hold_voltage=0.0):
         expected_points = int(expected_points)
         if expected_points <= 0:
             return []
@@ -977,7 +1200,10 @@ class Keithley2400FastSweepAdapter:
             raw = self.resource.read()
             rows = parse_2400_sweep_readback(raw)
         finally:
-            self.abort_to_zero(clear_only=False)
+            if keep_output_on:
+                self._hold_output_level(hold_voltage)
+            else:
+                self.abort_to_zero(clear_only=False)
         if len(rows) != expected_points:
             raise RuntimeError(
                 f"Expected {expected_points} readings from 2400, received {len(rows)}."
@@ -1021,6 +1247,37 @@ class Keithley2400FastSweepAdapter:
                 relaxed_current_range=relaxed_current_range,
             )
         return self.run_configured_batch(len(config["points"]))
+
+    def execute_source_memory_batch(
+        self,
+        points,
+        compliance_current,
+        nplc,
+        source_delay_s,
+        current_range=None,
+        current_autorange=True,
+        relaxed_current_range=False,
+        holdoff_enabled=False,
+        holdoff_delay_s=0.0,
+        keep_output_on=False,
+        hold_voltage=0.0,
+    ):
+        config = self.configure_source_memory_sweep(
+            points,
+            compliance_current,
+            nplc,
+            source_delay_s,
+            current_range=current_range,
+            current_autorange=current_autorange,
+            relaxed_current_range=relaxed_current_range,
+            holdoff_enabled=holdoff_enabled,
+            holdoff_delay_s=holdoff_delay_s,
+        )
+        return self.run_configured_batch(
+            len(config["points"]),
+            keep_output_on=keep_output_on,
+            hold_voltage=hold_voltage,
+        )
 
     def abort_to_zero(self, clear_only=True):
         try:
