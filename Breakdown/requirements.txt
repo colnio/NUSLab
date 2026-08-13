@@ -1,0 +1,28 @@
+# Crosspoint Breakdown Characterization Suite
+#
+# Bench machine is Windows + Python 3.10 (see CV_MAP/.venv310 references).
+#
+# Install:  python -m pip install -r Breakdown/requirements.txt
+
+# --- GUI shell (Breakdown/app_qt) ---
+PyQt5
+pyqtgraph
+matplotlib
+
+# --- data handling ---
+numpy
+pandas
+
+# --- instruments ---
+# Keithley 2400 SMU, via KeithleyGUI/keithley.py. Needs a VISA backend
+# (NI-VISA or Keysight IO Libraries) installed separately.
+pyvisa
+
+# Zurich Instruments MFIA. `zhinst.core` is the low-level LabOne API;
+# the code does NOT use zhinst.toolkit.
+zhinst
+
+# --- tests ---
+# Breakdown/core is stdlib-only by design, so the suite runs without
+# any instrument library present.
+pytest
