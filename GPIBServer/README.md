@@ -79,6 +79,8 @@ The `.data` file is CSV with a stable column set for manual reads, grouped sampl
 
 All API failures use `{"error":{"code":"...","message":"...","details":{...}}}`. Timeouts and instrument errors cause an emergency output-off attempt. If output-off verification fails, the device is marked unavailable until `POST /v1/devices/recover` succeeds. That explicit recovery action sends a GPIB interface clear, re-identifies the device, and verifies output off; routine discovery does not clear the interface. A disconnected 2002 input can float; its voltage is recorded as measured rather than treated as zero.
 
+Atomic metadata and Dropbox file replacements retry transient Windows access/sharing locks for up to 0.63 seconds. The previous destination stays intact until replacement succeeds. Persistent errors still use the normal storage-error shutdown or pending-sync path.
+
 ## Tests
 
 Run `\.venv\Scripts\python.exe -m pytest GPIBServer\tests -q` from the repository root. The fake VISA tests cover startup recovery, reservations, lease expiry, both sweep models, compliance, errors, and file fallback. A conservative live smoke check was run against the three connected instruments on 2026-09-21: identification and output-off on the DUT-connected 2400, DC voltage read on the open 2002, and a 0/0.1/0 V list on the 6430 with the 1 MΩ resistor and 10 µA compliance. No DUT voltage sweep was run.

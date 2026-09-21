@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,22 @@ def safe_name(name: str) -> str:
     return cleaned
 
 
+def replace_with_retry(source: Path, destination: Path) -> None:
+    """Retry brief Windows file locks, preserving atomic replacement and old data.
+
+    Persistent failures still reach the caller's storage-error shutdown path.
+    """
+    delays = (0.01, 0.02, 0.04, 0.08, 0.16, 0.32)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 def atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -48,7 +65,7 @@ def atomic_json(path: Path, payload: dict) -> None:
         json.dump(payload, stream, indent=2, allow_nan=False)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    replace_with_retry(temporary, path)
 
 
 class RunStore:
@@ -239,7 +256,7 @@ class RunRecord:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     temporary = destination.with_name(destination.name + ".pending")
                     shutil.copy2(source, temporary)
-                    os.replace(temporary, destination)
+                    replace_with_retry(temporary, destination)
                 self.metadata["sync"] = {"state": "synced", "last_error": None,
                                          "synced_at": datetime.now(timezone.utc).isoformat()}
                 self.write_metadata()
@@ -247,7 +264,7 @@ class RunRecord:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 temporary = destination.with_name(destination.name + ".pending")
                 shutil.copy2(self.meta_path, temporary)
-                os.replace(temporary, destination)
+                replace_with_retry(temporary, destination)
             except OSError as exc:
                 self.metadata["sync"] = {"state": "pending_sync", "last_error": str(exc)}
                 self.write_metadata()
