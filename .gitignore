@@ -174,3 +174,6 @@ sampleDB/sampleDB
 *png
 docs/2002-900-01F_Aug_2022_User.pdf
 .gitignore
+
+# Keep the notifier's local-credential exclusion rules in version control.
+!TelegramNotifier/.gitignore
