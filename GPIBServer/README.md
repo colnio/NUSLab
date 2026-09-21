@@ -83,4 +83,6 @@ Atomic metadata and Dropbox file replacements retry transient Windows access/sha
 
 ## Tests
 
+Voltage lists are uploaded in groups of at most 100 values using `:SOUR:LIST:VOLT:APP` for subsequent groups, as required by both instrument manuals. This upload grouping does not interrupt a hardware sweep. The loaded list length is checked before output enable. Combined configuration requests widen compliance before widening the sense range to avoid the 6430's range/compliance ordering error.
+
 Run `\.venv\Scripts\python.exe -m pytest GPIBServer\tests -q` from the repository root. The fake VISA tests cover startup recovery, reservations, lease expiry, both sweep models, compliance, errors, and file fallback. A conservative live smoke check was run against the three connected instruments on 2026-09-21: identification and output-off on the DUT-connected 2400, DC voltage read on the open 2002, and a 0/0.1/0 V list on the 6430 with the 1 MΩ resistor and 10 µA compliance. No DUT voltage sweep was run.

@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from GPIBServer.app import create_app
-from GPIBServer.instruments import VisaBus, parse_sweep
+from GPIBServer.instruments import Instrument, VisaBus, parse_idn, parse_sweep
 from GPIBServer.service import LabService
 from GPIBServer.storage import RunStore
 
@@ -55,8 +55,17 @@ class FakeHandle:
             self.state.setpoint = float(command.split()[-1])
         elif upper.startswith(":SENS:CURR:PROT "):
             self.state.compliance = float(command.split()[-1])
-        elif upper.startswith(":SOUR:LIST:VOLT "):
-            self.state.points = [float(part) for part in command.split(" ", 1)[1].split(",")]
+        elif upper.startswith(":SENS:CURR:RANG "):
+            if self.state.model == "6430" and float(command.split()[-1]) > self.state.compliance:
+                self.state.errors.append('824,"Cannot exceed compliance range"')
+        elif upper.startswith((":SOUR:LIST:VOLT ", ":SOUR:LIST:VOLT:APP ")):
+            points = [float(part) for part in command.split(" ", 1)[1].split(",")]
+            if len(points) > 100:
+                self.state.errors.append('-223,"Too much data"')
+            elif ":APP " in upper:
+                self.state.points.extend(points)
+            else:
+                self.state.points = points
         elif upper.startswith(":FORM:ELEM "):
             self.state.format = upper.split(" ", 1)[1]
         elif upper.startswith(":SENS:FUNC "):
@@ -83,6 +92,8 @@ class FakeHandle:
             return "10"
         if upper == ":SENS:FUNC?":
             return f"'{self.state.function}'"
+        if upper == ":SOUR:LIST:VOLT:POIN?":
+            return str(len(self.state.points))
         if upper == ":SYST:ERR?":
             return self.state.errors.pop(0) if self.state.errors else '0,"No error"'
         if upper == ":READ?":
@@ -150,6 +161,28 @@ def await_job(client, job_id):
             return data
         time.sleep(0.05)
     pytest.fail("job did not finish")
+
+
+@pytest.mark.parametrize("model", ["2400", "6430"])
+@pytest.mark.parametrize("count", [100, 101, 241, 2500])
+def test_long_list_upload_preserves_order_and_single_output_interval(model, count):
+    state = FakeState(model, "test", compliance=1e-5)
+    device = Instrument(parse_idn("GPIB0::1::INSTR", f"KEITHLEY,MODEL {model},test,1"), FakeHandle(state))
+    points = [((i % 21) - 10) / 10 for i in range(count)]
+    rows = device.sweep_batch(points, .1, .05, 1e-5, 1e-5)
+    assert state.points == points
+    assert [row["voltage_v"] for row in rows] == points
+    assert state.commands.count(":OUTP ON") == 1
+    assert state.commands.index(":SOUR:LIST:VOLT:POIN?") < state.commands.index(":OUTP ON")
+    assert not state.output
+
+
+def test_6430_widens_compliance_before_requested_sense_range():
+    state = FakeState("6430", "test", compliance=1e-6)
+    device = Instrument(parse_idn("GPIB0::1::INSTR", "KEITHLEY,MODEL 6430,test,1"), FakeHandle(state))
+    result = device.configure({"source_mode": "voltage", "sense_range": 1e-5, "compliance": 1e-5})
+    assert result["compliance"] == 1e-5
+    assert not result["output_enabled"]
 
 
 def test_startup_discovery_and_shutdown_are_nonresetting(server):

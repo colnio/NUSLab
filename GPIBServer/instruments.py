@@ -18,6 +18,7 @@ METER_FUNCTIONS = {
 }
 OVERLOAD = 9.9e37
 LIST_MAX_POINTS = 2500
+LIST_COMMAND_MAX_POINTS = 100
 
 
 def finite_number(value: Any, name: str) -> float:
@@ -252,6 +253,14 @@ class Instrument:
                 if value <= 0:
                     raise ServiceError("invalid_value", "source_range must be positive", 422)
                 self.write(f":SOUR:{source}:RANG {value:.12g}")
+            protection_set = False
+            if settings.get("compliance") is not None and settings.get("sense_range") is not None:
+                protection = finite_number(settings["compliance"], "compliance")
+                previous = finite_number(self.query(f":SENS:{sense}:PROT?"), "reported compliance")
+                if protection > previous:
+                    # The 6430 rejects a sense range above its existing compliance range.
+                    self.write(f":SENS:{sense}:PROT {protection:.12g}")
+                    protection_set = True
             if settings.get("sense_autorange") is not None:
                 self.write(f":SENS:{sense}:RANG:AUTO {'ON' if settings['sense_autorange'] else 'OFF'}")
             if settings.get("sense_range") is not None:
@@ -259,7 +268,7 @@ class Instrument:
                 if value <= 0:
                     raise ServiceError("invalid_value", "sense_range must be positive", 422)
                 self.write(f":SENS:{sense}:RANG {value:.12g}")
-            if settings.get("compliance") is not None:
+            if settings.get("compliance") is not None and not protection_set:
                 value = finite_number(settings["compliance"], "compliance")
                 if value <= 0:
                     raise ServiceError("invalid_value", "compliance must be positive", 422)
@@ -359,9 +368,16 @@ class Instrument:
         self.write(":ARM:COUN 1")
         self.write(f":TRIG:COUN {len(points)}")
         self.write(":SOUR:VOLT:MODE LIST")
-        self.write(":SOUR:LIST:VOLT " + ",".join(f"{point:.12g}" for point in points))
+        for start in range(0, len(points), LIST_COMMAND_MAX_POINTS):
+            command = ":SOUR:LIST:VOLT" + (":APP" if start else "")
+            chunk = points[start:start + LIST_COMMAND_MAX_POINTS]
+            self.write(command + " " + ",".join(f"{point:.12g}" for point in chunk))
         self.write(":SOUR:SWE:RANG BEST")
         self.check_errors()
+        loaded = finite_number(self.query(":SOUR:LIST:VOLT:POIN?"), "loaded list length")
+        if loaded != len(points):
+            raise ServiceError("incomplete_readback", "Instrument source list length does not match request", 502,
+                               expected_points=len(points), loaded_points=loaded)
         estimated_ms = int((len(points) * (nplc / 50 + delay_s + 0.02) + 10) * 1000)
         try:
             self.write(":OUTP ON")
