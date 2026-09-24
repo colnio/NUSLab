@@ -179,18 +179,23 @@ class LabService:
         self.bus.recover_identity(resource)
         device = self.bus.open(resource)
         try:
-            if device.model in {"2400", "6430"}:
+            cleanup = None
+            if device.has_source_outputs:
                 with device.lock:
-                    device.safe_off()
+                    cleanup = device.safe_off()
             with self.lock:
                 self.blocked_resources.pop(resource, None)
-            return {"resource": resource, "status": "ready"}
+            return {"resource": resource, "status": "ready", "cleanup": cleanup}
+        except ServiceError as exc:
+            with self.lock:
+                self.blocked_resources[resource] = exc.payload()
+            raise
         finally:
             self.bus.close(resource)
 
     def create_session(self, sample_name: str, aliases: dict[str, str], notes: dict | None = None) -> dict:
-        if not aliases or len(aliases) > 3:
-            raise ServiceError("invalid_devices", "Reserve one to three devices", 422)
+        if not aliases or len(aliases) > 4:
+            raise ServiceError("invalid_devices", "Reserve one to four devices", 422)
         if len(set(aliases.values())) != len(aliases):
             raise ServiceError("duplicate_device", "Each alias must name a different instrument", 422)
         for alias in aliases:
@@ -199,19 +204,25 @@ class LabService:
         with self.lock:
             for resource in aliases.values():
                 if resource in self.blocked_resources:
-                    raise ServiceError("device_unavailable", "Startup shutdown failed for this device", 503,
+                    raise ServiceError("device_unavailable", "Device requires recovery after a cleanup failure", 503,
                                        resource=resource, cause=self.blocked_resources[resource])
                 if resource in self.owners:
                     raise ServiceError("device_busy", "Device is already reserved", 409, resource=resource)
             opened: dict[str, Instrument] = {}
+            cleanup_results = {}
             try:
                 for alias, resource in sorted(aliases.items(), key=lambda item: item[1]):
                     device = self.bus.open(resource)
                     opened[alias] = device
-                    if device.model in {"2400", "6430"}:
+                    if device.has_source_outputs:
                         with device.lock:
-                            device.safe_off()
+                            try:
+                                cleanup_results[alias] = device.safe_off()
+                            except ServiceError as exc:
+                                self.blocked_resources[device.resource] = exc.payload()
+                                raise
                 record = self.store.create(sample_name, {alias: device.info for alias, device in opened.items()}, notes)
+                record.append_event("outputs_initialized", cleanup_results)
                 session = Session(record.run_id, opened, record, time.monotonic() + LEASE_SECONDS)
                 self.sessions[session.id] = session
                 for resource in aliases.values():
@@ -220,8 +231,11 @@ class LabService:
                 for device in opened.values():
                     try:
                         with device.lock:
-                            if device.model in {"2400", "6430"}:
+                            if device.has_source_outputs:
                                 device.safe_off()
+                    except ServiceError as exc:
+                        self.blocked_resources[device.resource] = exc.payload()
+                        LOG.exception("Rollback cleanup failed: %s", device.resource)
                     except Exception:
                         LOG.exception("Rollback shutdown failed: %s", device.resource)
                     self.bus.close(device.resource)
@@ -255,9 +269,13 @@ class LabService:
 
     def _device(self, session: Session, alias: str) -> Instrument:
         try:
-            return session.devices[alias]
+            device = session.devices[alias]
         except KeyError as exc:
             raise ServiceError("alias_not_found", "Device alias was not reserved", 404, alias=alias) from exc
+        if device.resource in self.blocked_resources:
+            raise ServiceError("device_unavailable", "Release the session and recover this device before further operations", 503,
+                               resource=device.resource, cause=self.blocked_resources[device.resource])
+        return device
 
     def _operate(self, session_id: str, alias: str, event: str, action: Callable[[Instrument], dict],
                  event_details: dict | None = None) -> dict:
@@ -268,6 +286,9 @@ class LabService:
             with device.lock:
                 result = action(device)
         except ServiceError as exc:
+            if exc.code == "shutdown_failed":
+                with self.lock:
+                    self.blocked_resources[device.resource] = exc.payload()
             try:
                 session.record.append_event("error", {"operation": event, "alias": alias, "error": exc.payload()})
             except OSError as save_exc:
@@ -290,11 +311,11 @@ class LabService:
                 raise ServiceError("device_busy", "Device has an active sweep", 409, alias=alias)
 
     def _emergency_off(self, device: Instrument, record: RunRecord) -> None:
-        if device.model not in {"2400", "6430"}:
+        if not device.has_source_outputs:
             return
         try:
             with device.lock:
-                device.safe_off()
+                result = device.safe_off()
         except ServiceError as exc:
             with self.lock:
                 self.blocked_resources[device.resource] = exc.payload()
@@ -302,6 +323,8 @@ class LabService:
                 record.append_event("shutdown_failed", {"resource": device.resource, "error": exc.payload()})
             except OSError:
                 LOG.exception("Could not record shutdown failure: %s", device.resource)
+        else:
+            self._safe_event(record, "emergency_output_cleanup", {"resource": device.resource, "result": result})
 
     def configure(self, sid: str, alias: str, settings: dict) -> dict:
         return self._operate(sid, alias, "configure", lambda device: device.configure(settings), settings)
@@ -314,6 +337,9 @@ class LabService:
 
     def output(self, sid: str, alias: str, enabled: bool) -> dict:
         return self._operate(sid, alias, "output", lambda device: device.output(enabled), {"enabled": enabled})
+
+    def minimize_outputs(self, sid: str, alias: str) -> dict:
+        return self._operate(sid, alias, "minimize_outputs", lambda device: device.minimize_outputs())
 
     def read(self, sid: str, alias: str, function: str | None = None) -> dict:
         session = self.get_session(sid)
@@ -369,11 +395,21 @@ class LabService:
                 "current_a": result.get("current_a"), "value": result.get("value"),
                 "unit": result.get("unit"), "function": result.get("function"),
                 "status_word": result.get("status_word"), "in_compliance": result.get("in_compliance"),
-                "range_compliance": result.get("range_compliance"), "overload": result.get("overload")}
+                "range_compliance": result.get("range_compliance"), "overload": result.get("overload"),
+                **{key: result.get(key) for key in ("x", "y", "magnitude", "phase_deg", "frequency_hz", "input_mode", "status_scope", "sensitivity", "range_exceeded")},
+                **{key: result.get("status_flags", {}).get(key) for key in (
+                    "input_overload", "filter_overload", "output_overload", "reference_unlocked",
+                    "frequency_range_changed", "time_constant_changed", "data_triggered")},
+                **{key: result.get("diagnostics", {}).get(key) for key in ("standard_event_status", "error_status")}}
 
     def raw_scpi(self, sid: str, alias: str, kind: str, command: str) -> dict:
-        return self._operate(sid, alias, "raw_scpi", lambda device: device.raw_scpi(kind, command),
-                             {"kind": kind, "command": command})
+        result = self._operate(sid, alias, "raw_scpi", lambda device: device.raw_scpi(kind, command),
+                               {"kind": kind, "command": command})
+        session = self.get_session(sid)
+        device = self._device(session, alias)
+        if device.model == "SR830" and result.get("instrument_errors"):
+            self._emergency_off(device, session.record)
+        return result
 
     def start_sweep(self, sid: str, alias: str, points: list[float], nplc: float,
                     source_delay_s: float = 0.0, compliance_a: float | None = None,
@@ -563,11 +599,12 @@ class LabService:
                 return {"run_id": sid, "status": "shutdown_pending"}
             session.finalizing = True
         failures = []
+        cleanup_results = {}
         for device in session.devices.values():
             try:
                 with device.lock:
-                    if device.model in {"2400", "6430"}:
-                        device.safe_off()
+                    if device.has_source_outputs:
+                        cleanup_results[device.resource] = device.safe_off()
             except ServiceError as exc:
                 failures.append(exc.payload())
                 self.blocked_resources[device.resource] = exc.payload()
@@ -584,7 +621,8 @@ class LabService:
         save_error = None
         try:
             session.record.update(status=status, closed_at=utc_now())
-            session.record.append_event("session_closed", {"status": status, "shutdown_errors": failures})
+            session.record.append_event("session_closed", {"status": status, "shutdown_errors": failures,
+                                                          "output_cleanup": cleanup_results})
             sync = session.record.sync()
         except OSError as exc:
             save_error = str(exc)
@@ -593,8 +631,8 @@ class LabService:
                 self.sessions.pop(sid, None)
             self.store.forget(sid)
         if failures:
-            raise ServiceError("shutdown_failed", "One or more outputs could not be verified off", 502,
+            raise ServiceError("shutdown_failed", "One or more source cleanup states could not be verified", 502,
                                errors=failures, run_id=sid, sync=sync)
         if save_error:
             raise ServiceError("storage_error", save_error, 507, run_id=sid)
-        return {"run_id": sid, "status": status, "sync": sync}
+        return {"run_id": sid, "status": status, "sync": sync, "output_cleanup": cleanup_results}

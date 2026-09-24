@@ -1,0 +1,38 @@
+[
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 19,
+    "replicate": 0,
+    "reason": "signal exceeds sensitivity"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 19,
+    "replicate": 1,
+    "reason": "signal exceeds sensitivity"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 19,
+    "replicate": 2,
+    "reason": "signal exceeds sensitivity"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 20,
+    "replicate": 0,
+    "reason": "signal exceeds sensitivity"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 20,
+    "replicate": 1,
+    "reason": "signal exceeds sensitivity"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "point_index": 20,
+    "replicate": 2,
+    "reason": "signal exceeds sensitivity"
+  }
+]

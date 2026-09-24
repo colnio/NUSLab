@@ -30,6 +30,11 @@ DATA_COLUMNS = [
     "operation", "point_index", "source_voltage_v", "voltage_v", "current_a", "value", "unit",
     "function", "instrument_time_s", "instrument_time_raw_s", "timestamp_invalid",
     "status_word", "in_compliance", "range_compliance", "overload",
+    "x", "y", "magnitude", "phase_deg", "frequency_hz", "input_mode", "status_scope",
+    "input_overload", "filter_overload", "output_overload", "reference_unlocked",
+    "frequency_range_changed", "time_constant_changed", "data_triggered",
+    "standard_event_status", "error_status",
+    "sensitivity", "range_exceeded",
 ]
 PLOT_LOCK = threading.Lock()
 
@@ -86,7 +91,7 @@ class RunStore:
         event_rel = relative_base / "data" / f"{stem}.events.jsonl"
         meta_rel = relative_base / "data" / f"{stem}.meta.json"
         metadata = {
-            "schema_version": 1, "run_id": run_id, "sample_name": sample_name,
+            "schema_version": 3, "run_id": run_id, "sample_name": sample_name,
             "sample_folder": name, "created_at": datetime.now(timezone.utc).isoformat(),
             "devices": devices, "notes": notes or {}, "status": "active",
             "measurement_count": 0, "jobs": {}, "warnings": [],

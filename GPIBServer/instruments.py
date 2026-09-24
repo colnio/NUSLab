@@ -37,8 +37,14 @@ def utc_now() -> str:
 
 def parse_idn(resource: str, raw: str) -> dict:
     parts = [part.strip() for part in raw.split(",")]
+    if len(parts) >= 2 and parts[0].upper().replace("_", " ") == "STANFORD RESEARCH SYSTEMS" and parts[1].upper() == "SR830":
+        return {
+            "resource": resource, "model": "SR830",
+            "serial": re.sub(r"^s/n", "", parts[2], flags=re.I) if len(parts) > 2 else "",
+            "firmware": re.sub(r"^ver", "", parts[3], flags=re.I) if len(parts) > 3 else "", "idn": raw,
+        }
     if len(parts) < 2 or "KEITHLEY" not in parts[0].upper():
-        raise ServiceError("unsupported_device", "Resource is not a recognized Keithley", 422, resource=resource, idn=raw)
+        raise ServiceError("unsupported_device", "Resource is not a supported instrument", 422, resource=resource, idn=raw)
     match = re.search(r"\b(2400|6430|2002)\b", parts[1].upper())
     if not match:
         raise ServiceError("unsupported_device", "Keithley model is unsupported", 422, resource=resource, idn=raw)
@@ -109,6 +115,14 @@ class Instrument:
     def resource(self) -> str:
         return self.info["resource"]
 
+    @property
+    def has_source_outputs(self) -> bool:
+        return self.model in {"2400", "6430"}
+
+    def minimize_outputs(self) -> dict:
+        raise ServiceError("unsupported_operation", "Output minimization requires an SR830", 422,
+                           resource=self.resource)
+
     def query(self, command: str, timeout_ms: int | None = None) -> str:
         previous = self.handle.timeout
         try:
@@ -157,7 +171,7 @@ class Instrument:
         self._smu()
         return self.query(":OUTP?").strip().upper() in {"1", "+1", "ON"}
 
-    def safe_off(self) -> None:
+    def safe_off(self) -> dict:
         self._smu()
         failures = []
         for command in (":ABOR", ":OUTP OFF"):
@@ -175,6 +189,7 @@ class Instrument:
         if failures:
             raise ServiceError("shutdown_failed", "Could not verify source output is off", 502,
                                resource=self.resource, failures=failures)
+        return {"status": "off", "output_enabled": False}
 
     def configuration(self) -> dict:
         if self.model == "2002":
@@ -449,7 +464,11 @@ class VisaBus:
                 info = parse_idn(resource, str(handle.query("*IDN?")).strip())
                 if info["model"] != self.identities[resource]["model"] or info["serial"] != self.identities[resource]["serial"]:
                     raise ServiceError("identity_changed", "Resource identity changed since discovery", 409, resource=resource)
-                instrument = Instrument(info, handle)
+                if info["model"] == "SR830":
+                    from .sr830 import SR830
+                    instrument = SR830(info, handle)
+                else:
+                    instrument = Instrument(info, handle)
                 self.active[resource] = instrument
                 return instrument
             except ServiceError:
@@ -502,14 +521,14 @@ class VisaBus:
     def startup_shutdown(self) -> list[dict]:
         results = []
         for info in self.discover():
-            if info["model"] not in {"2400", "6430"}:
-                continue
             resource = info["resource"]
             try:
                 device = self.open(resource)
+                if not device.has_source_outputs:
+                    continue
                 with device.lock:
-                    device.safe_off()
-                results.append({"resource": resource, "status": "off"})
+                    cleanup = device.safe_off()
+                results.append({"resource": resource, **cleanup})
             except ServiceError as exc:
                 results.append({"resource": resource, "status": "error", "error": exc.payload()})
             finally:
@@ -521,7 +540,7 @@ class VisaBus:
             resources = list(self.active)
         for resource in resources:
             device = self.active.get(resource)
-            if device is not None and device.model in {"2400", "6430"}:
+            if device is not None and device.has_source_outputs:
                 with device.lock:
                     try:
                         device.safe_off()

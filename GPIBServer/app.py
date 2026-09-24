@@ -10,7 +10,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 
 from .errors import ServiceError
 from .service import LabService
@@ -23,6 +23,7 @@ class SessionRequest(BaseModel):
 
 
 class ConfigureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     source_mode: Literal["voltage", "current"] | None = None
     function: str | None = None
     nplc: float | None = None
@@ -32,6 +33,22 @@ class ConfigureRequest(BaseModel):
     compliance: float | None = None
     range_auto: bool | None = None
     range_value: float | None = None
+    reference_source: Literal["internal", "external"] | None = None
+    frequency_hz: StrictFloat | None = Field(default=None, description="SR830 internal reference frequency in Hz (0.001–102000).")
+    phase_deg: StrictFloat | None = None
+    harmonic: StrictInt | None = None
+    external_trigger: Literal["sine", "ttl_rising", "ttl_falling"] | None = None
+    sine_amplitude_v_rms: StrictFloat | None = Field(default=None, description="SR830 Sine Out RMS volts, 0.004–5; readback reports hardware rounding. Cannot be turned off.")
+    input_mode: Literal["A", "A-B", "current_1e6", "current_1e8"] | None = None
+    coupling: Literal["AC", "DC"] | None = None
+    grounding: Literal["float", "ground"] | None = None
+    notch_filter: Literal["off", "line", "twice_line", "both"] | None = None
+    sensitivity: StrictFloat | None = Field(default=None, description="SR830 discrete full scale sensitivity, in V or A for the requested/current input mode. High current gain requires <=10 nA.")
+    reserve: Literal["high", "normal", "low_noise"] | None = None
+    time_constant_s: StrictFloat | None = None
+    filter_slope_db_oct: StrictInt | None = Field(default=None, description="SR830 low-pass slope: 6, 12, 18 or 24 dB/oct.")
+    synchronous_filter: StrictBool | None = Field(default=None, description="Select synchronous filtering when detection frequency is below approximately 200 Hz; selected does not mean active at higher frequencies.")
+    aux_outputs_v: dict[str, StrictFloat] | None = Field(default=None, description="SR830 AUX output voltages (-10.5–10.5 V), keyed by channels '1'–'4'. Separate connectors; these are not a Sine Out DC offset or measured sample bias.")
 
 
 class SetpointRequest(BaseModel):
@@ -101,7 +118,7 @@ def create_app(service: LabService | None = None) -> FastAPI:
             logger.removeHandler(handler)
             handler.close()
 
-    app = FastAPI(title="NUSLab GPIB Server", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="NUSLab GPIB Server", version="1.1.1", lifespan=lifespan)
     app.state.lab = lab
 
     @app.exception_handler(ServiceError)
@@ -157,6 +174,7 @@ def create_app(service: LabService | None = None) -> FastAPI:
 
     @app.post("/v1/sessions/{session_id}/devices/{alias}/configure")
     def configure(session_id: str, alias: str, request: ConfigureRequest):
+        """Apply model-specific settings and return actual readback. SR830 responses include adjustments; no settling delay is imposed."""
         return lab.configure(session_id, alias, request.model_dump(exclude_none=True))
 
     @app.get("/v1/sessions/{session_id}/devices/{alias}")
@@ -171,8 +189,14 @@ def create_app(service: LabService | None = None) -> FastAPI:
     def output(session_id: str, alias: str, request: OutputRequest):
         return lab.output(session_id, alias, request.enabled)
 
+    @app.post("/v1/sessions/{session_id}/devices/{alias}/minimize-outputs")
+    def minimize_outputs(session_id: str, alias: str):
+        """SR830 only: verify 4 mV RMS Sine Out and zero on all four AUX outputs. AC remains active; this is not output-off."""
+        return lab.minimize_outputs(session_id, alias)
+
     @app.post("/v1/sessions/{session_id}/devices/{alias}/read")
     def read(session_id: str, alias: str, request: ReadRequest | None = None):
+        """Record a reading. SR830 returns current filtered X/Y, magnitude, phase and frequency without waiting for settling. Magnitude is not resistance; status flags are latched since their preceding read. Independent range_exceeded checks X/Y/magnitude against the actual sensitivity; widen range and settle before using such readings, even when native overload is false."""
         return lab.read(session_id, alias, request.function if request else None)
 
     @app.post("/v1/sessions/{session_id}/samples")

@@ -1,0 +1,127 @@
+{
+  "completed_points": 151,
+  "readings": 453,
+  "low_gain": {
+    "plateau_s": 9.86261e-07,
+    "cutoff_hz": 61144.26482067839,
+    "bracket_hz": [
+      60000.0,
+      63330.0
+    ],
+    "peak_hz": 38000.0,
+    "peak_s": 2.64206e-06
+  },
+  "high_gain_diagnostic": {
+    "plateau_s": 9.660041666666666e-07,
+    "cutoff_hz": 767.5798172013247,
+    "bracket_hz": [
+      700.0,
+      933.0
+    ]
+  },
+  "amplitude_fits": [
+    {
+      "frequency_hz": 13.033,
+      "slope_s": 9.847879524594372e-07,
+      "intercept_a": 7.168047988436746e-11,
+      "max_residual_a": 5.071228972211714e-11,
+      "r_squared": 0.9999999483380942,
+      "g_min_s": 9.8488e-07,
+      "g_max_s": 9.900299999999998e-07
+    },
+    {
+      "frequency_hz": 1033,
+      "slope_s": 9.853170457341283e-07,
+      "intercept_a": 7.198260538524034e-11,
+      "max_residual_a": 5.151282120193242e-11,
+      "r_squared": 0.9999999558998789,
+      "g_min_s": 9.854233333333333e-07,
+      "g_max_s": 9.913575e-07
+    },
+    {
+      "frequency_hz": 10330,
+      "slope_s": 1.0492637910926386e-06,
+      "intercept_a": 7.422933439629428e-11,
+      "max_residual_a": 4.5058223006500204e-11,
+      "r_squared": 0.9999999670620163,
+      "g_min_s": 1.049374e-06,
+      "g_max_s": 1.0573325e-06
+    },
+    {
+      "frequency_hz": 38000,
+      "slope_s": 2.6382850609470233e-06,
+      "intercept_a": 1.5491721050169584e-10,
+      "max_residual_a": 6.28297421471408e-11,
+      "r_squared": 0.9999999255662182,
+      "g_min_s": 2.63886e-06,
+      "g_max_s": 2.661958333333333e-06
+    },
+    {
+      "frequency_hz": 70000,
+      "slope_s": 4.684817985214114e-07,
+      "intercept_a": 1.5046205772215765e-11,
+      "max_residual_a": 1.8440608753310003e-11,
+      "r_squared": 0.9999999798270066,
+      "g_min_s": 4.68477e-07,
+      "g_max_s": 4.6955983333333336e-07
+    },
+    {
+      "frequency_hz": 102000,
+      "slope_s": 1.819601427102679e-07,
+      "intercept_a": -1.0579593696695126e-11,
+      "max_residual_a": 1.7182281690221117e-11,
+      "r_squared": 0.9999999243438088,
+      "g_min_s": 1.8116466666666668e-07,
+      "g_max_s": 1.8197558333333334e-07
+    }
+  ],
+  "coupling_ratios": [
+    {
+      "frequency_hz": 0.04,
+      "ac_over_dc": 0.2406462671278031
+    },
+    {
+      "frequency_hz": 0.08,
+      "ac_over_dc": 0.44469000070996073
+    },
+    {
+      "frequency_hz": 0.16,
+      "ac_over_dc": 0.7045985171962637
+    },
+    {
+      "frequency_hz": 0.32,
+      "ac_over_dc": 0.8927509626729684
+    },
+    {
+      "frequency_hz": 0.64,
+      "ac_over_dc": 0.9691778992599506
+    },
+    {
+      "frequency_hz": 1.28,
+      "ac_over_dc": 0.9916116447085949
+    },
+    {
+      "frequency_hz": 3.1,
+      "ac_over_dc": 0.9982281408156434
+    },
+    {
+      "frequency_hz": 13.033,
+      "ac_over_dc": 0.9995567816465004
+    }
+  ],
+  "ac_coupling_rc_fit_hz": 0.16120958594276644,
+  "ac_coupling_ratio_fit_rms_residual": 0.0003685104434209415,
+  "ac_coupling_cutoff_hz": 0.16167381035838058,
+  "ac_coupling_cutoff_bracket_hz": [
+    0.16,
+    0.32
+  ],
+  "voltage_points_rejected_for_settling_hz": [],
+  "voltage_diagnostic": {
+    "fitted_corner_hz": 1097.749821812042,
+    "fitted_dc_transfer": 0.9049128063618954,
+    "equivalent_parallel_capacitance_pf": 159.48118043152883,
+    "fit_complex_rms_residual": 0.001146479097771016,
+    "fit_maximum_frequency_hz": 10330.0
+  }
+}

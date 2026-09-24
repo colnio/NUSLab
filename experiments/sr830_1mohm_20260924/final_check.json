@@ -1,0 +1,367 @@
+{
+  "health_before": {
+    "status": "ready",
+    "started": true,
+    "startup_shutdown": [
+      {
+        "resource": "GPIB0::8::INSTR",
+        "status": "outputs_minimized",
+        "sine_amplitude_v_rms": 0.004,
+        "aux_outputs_v": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "sine_output_active": true,
+        "supports_output_off": false,
+        "diagnostics": {
+          "standard_event_status": 0,
+          "error_status": 0,
+          "instrument_errors": []
+        }
+      },
+      {
+        "resource": "GPIB0::12::INSTR",
+        "status": "off",
+        "output_enabled": false
+      },
+      {
+        "resource": "GPIB0::16::INSTR",
+        "status": "off",
+        "output_enabled": false
+      }
+    ],
+    "blocked_resources": {},
+    "discovery_errors": [],
+    "active_sessions": 0
+  },
+  "device": {
+    "resource": "GPIB0::8::INSTR",
+    "model": "SR830",
+    "serial": "40423",
+    "firmware": "1.07",
+    "idn": "Stanford_Research_Systems,SR830,s/n40423,ver1.07",
+    "reserved": false,
+    "owner_session_id": null,
+    "available": true
+  },
+  "session": {
+    "session_id": "d187ef6ec5b449fa97a06be30f939f01",
+    "run_id": "d187ef6ec5b449fa97a06be30f939f01",
+    "devices": {
+      "lia": {
+        "resource": "GPIB0::8::INSTR",
+        "model": "SR830",
+        "serial": "40423",
+        "firmware": "1.07",
+        "idn": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+      }
+    },
+    "lease_seconds": 90,
+    "heartbeat_interval_seconds": 30,
+    "expires_in_seconds": 90.0,
+    "status": "active",
+    "sync": {
+      "state": "pending_sync",
+      "last_error": null
+    }
+  },
+  "identity_query": {
+    "response": "Stanford_Research_Systems,SR830,s/n40423,ver1.07",
+    "instrument_errors": [],
+    "diagnostics": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    }
+  },
+  "configuration": {
+    "reference_source": "internal",
+    "external_trigger": "sine",
+    "input_mode": "current_1e6",
+    "grounding": "float",
+    "coupling": "DC",
+    "notch_filter": "off",
+    "reserve": "low_noise",
+    "filter_slope_db_oct": 24,
+    "synchronous_filter": true,
+    "frequency_hz": 13.033,
+    "phase_deg": 0.0,
+    "harmonic": 1,
+    "sine_amplitude_v_rms": 0.004,
+    "unit": "A",
+    "sensitivity": 1e-08,
+    "sensitivity_index": 20,
+    "time_constant_s": 0.30000000000000004,
+    "aux_outputs_v": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0,
+      "4": 0.0
+    },
+    "sine_output_active": true,
+    "supports_output_off": false,
+    "output_state": "outputs_minimized",
+    "status_word": 16,
+    "status_flags": {
+      "input_overload": false,
+      "filter_overload": false,
+      "output_overload": false,
+      "reference_unlocked": false,
+      "frequency_range_changed": true,
+      "time_constant_changed": false,
+      "data_triggered": false
+    },
+    "status_scope": "latched_since_previous_read",
+    "overload": false,
+    "reference_unlocked": false,
+    "diagnostics": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    },
+    "adjustments": {},
+    "diagnostics_before": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    }
+  },
+  "read": {
+    "x": -3.96042e-09,
+    "y": -3.18325e-12,
+    "magnitude": 3.95997e-09,
+    "phase_deg": -179.958,
+    "frequency_hz": 13.033,
+    "timestamp": "2026-09-24T10:30:30.471+00:00",
+    "input_mode": "current_1e6",
+    "unit": "A",
+    "function": "lockin",
+    "settling_waited": false,
+    "snapshot_timing": "X/Y coherent; magnitude/phase pair sampled approximately 10 us apart from X/Y",
+    "sensitivity": 1e-08,
+    "range_exceeded": false,
+    "status_word": 0,
+    "status_flags": {
+      "input_overload": false,
+      "filter_overload": false,
+      "output_overload": false,
+      "reference_unlocked": false,
+      "frequency_range_changed": false,
+      "time_constant_changed": false,
+      "data_triggered": false
+    },
+    "status_scope": "latched_since_previous_read",
+    "overload": false,
+    "reference_unlocked": false,
+    "diagnostics": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    }
+  },
+  "samples": {
+    "sample_id": "10d1ceb3ee3540f599d835d16ad76bab",
+    "readings": {
+      "lia": {
+        "x": -3.96042e-09,
+        "y": -2.7285e-12,
+        "magnitude": 3.95997e-09,
+        "phase_deg": -179.964,
+        "frequency_hz": 13.033,
+        "timestamp": "2026-09-24T10:30:30.664+00:00",
+        "input_mode": "current_1e6",
+        "unit": "A",
+        "function": "lockin",
+        "settling_waited": false,
+        "snapshot_timing": "X/Y coherent; magnitude/phase pair sampled approximately 10 us apart from X/Y",
+        "sensitivity": 1e-08,
+        "range_exceeded": false,
+        "status_word": 0,
+        "status_flags": {
+          "input_overload": false,
+          "filter_overload": false,
+          "output_overload": false,
+          "reference_unlocked": false,
+          "frequency_range_changed": false,
+          "time_constant_changed": false,
+          "data_triggered": false
+        },
+        "status_scope": "latched_since_previous_read",
+        "overload": false,
+        "reference_unlocked": false,
+        "diagnostics": {
+          "standard_event_status": 0,
+          "error_status": 0,
+          "instrument_errors": []
+        }
+      }
+    }
+  },
+  "cleanup": {
+    "status": "outputs_minimized",
+    "sine_amplitude_v_rms": 0.004,
+    "aux_outputs_v": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0,
+      "4": 0.0
+    },
+    "sine_output_active": true,
+    "supports_output_off": false,
+    "diagnostics": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    }
+  },
+  "final_configuration": {
+    "reference_source": "internal",
+    "external_trigger": "sine",
+    "input_mode": "current_1e6",
+    "grounding": "float",
+    "coupling": "DC",
+    "notch_filter": "off",
+    "reserve": "low_noise",
+    "filter_slope_db_oct": 24,
+    "synchronous_filter": true,
+    "frequency_hz": 13.033,
+    "phase_deg": 0.0,
+    "harmonic": 1,
+    "sine_amplitude_v_rms": 0.004,
+    "unit": "A",
+    "sensitivity": 1e-08,
+    "sensitivity_index": 20,
+    "time_constant_s": 0.30000000000000004,
+    "aux_outputs_v": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0,
+      "4": 0.0
+    },
+    "sine_output_active": true,
+    "supports_output_off": false,
+    "output_state": "outputs_minimized",
+    "status_word": 0,
+    "status_flags": {
+      "input_overload": false,
+      "filter_overload": false,
+      "output_overload": false,
+      "reference_unlocked": false,
+      "frequency_range_changed": false,
+      "time_constant_changed": false,
+      "data_triggered": false
+    },
+    "status_scope": "latched_since_previous_read",
+    "overload": false,
+    "reference_unlocked": false,
+    "diagnostics": {
+      "standard_event_status": 0,
+      "error_status": 0,
+      "instrument_errors": []
+    }
+  },
+  "release": {
+    "run_id": "d187ef6ec5b449fa97a06be30f939f01",
+    "status": "closed",
+    "sync": {
+      "run_id": "d187ef6ec5b449fa97a06be30f939f01",
+      "state": "synced",
+      "local_path": "C:\\Users\\MeasurmentStand\\AppData\\Local\\NUSLab\\GPIBServer\\recovery\\2026-09-24\\SR830_1Mohm_final_check\\data\\REST_SR830_1Mohm_final_check_2026-09-24_18-30-13_d187ef6e.data",
+      "dropbox_path": "C:\\Users\\MeasurmentStand\\NUS Dropbox\\Ozyilmaz Group\\1_MAC\\1_Projects\\Iurii\\ResistiveSwitches\\VacuumProbeData\\2026-09-24\\SR830_1Mohm_final_check\\data\\REST_SR830_1Mohm_final_check_2026-09-24_18-30-13_d187ef6e.data",
+      "error": null
+    },
+    "output_cleanup": {
+      "GPIB0::8::INSTR": {
+        "status": "outputs_minimized",
+        "sine_amplitude_v_rms": 0.004,
+        "aux_outputs_v": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "sine_output_active": true,
+        "supports_output_off": false,
+        "diagnostics": {
+          "standard_event_status": 0,
+          "error_status": 0,
+          "instrument_errors": []
+        }
+      }
+    }
+  },
+  "recording": {
+    "schema_version": 3,
+    "run_id": "d187ef6ec5b449fa97a06be30f939f01",
+    "sample_name": "SR830_1Mohm_final_check",
+    "sample_folder": "SR830_1Mohm_final_check",
+    "created_at": "2026-09-24T10:30:13.670870+00:00",
+    "devices": {
+      "lia": {
+        "resource": "GPIB0::8::INSTR",
+        "model": "SR830",
+        "serial": "40423",
+        "firmware": "1.07",
+        "idn": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+      }
+    },
+    "notes": {},
+    "status": "closed",
+    "measurement_count": 2,
+    "jobs": {},
+    "warnings": [],
+    "files": {
+      "data": "2026-09-24/SR830_1Mohm_final_check/data/REST_SR830_1Mohm_final_check_2026-09-24_18-30-13_d187ef6e.data",
+      "events": "2026-09-24/SR830_1Mohm_final_check/data/REST_SR830_1Mohm_final_check_2026-09-24_18-30-13_d187ef6e.events.jsonl",
+      "metadata": "2026-09-24/SR830_1Mohm_final_check/data/REST_SR830_1Mohm_final_check_2026-09-24_18-30-13_d187ef6e.meta.json",
+      "plots": []
+    },
+    "sync": {
+      "state": "synced",
+      "last_error": null,
+      "synced_at": "2026-09-24T10:30:31.552858+00:00"
+    },
+    "local_root": "C:\\Users\\MeasurmentStand\\AppData\\Local\\NUSLab\\GPIBServer\\recovery",
+    "dropbox_root": "C:\\Users\\MeasurmentStand\\NUS Dropbox\\Ozyilmaz Group\\1_MAC\\1_Projects\\Iurii\\ResistiveSwitches\\VacuumProbeData",
+    "closed_at": "2026-09-24T10:30:31.466+00:00"
+  },
+  "health_after": {
+    "status": "ready",
+    "started": true,
+    "startup_shutdown": [
+      {
+        "resource": "GPIB0::8::INSTR",
+        "status": "outputs_minimized",
+        "sine_amplitude_v_rms": 0.004,
+        "aux_outputs_v": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "sine_output_active": true,
+        "supports_output_off": false,
+        "diagnostics": {
+          "standard_event_status": 0,
+          "error_status": 0,
+          "instrument_errors": []
+        }
+      },
+      {
+        "resource": "GPIB0::12::INSTR",
+        "status": "off",
+        "output_enabled": false
+      },
+      {
+        "resource": "GPIB0::16::INSTR",
+        "status": "off",
+        "output_enabled": false
+      }
+    ],
+    "blocked_resources": {},
+    "discovery_errors": [],
+    "active_sessions": 0
+  }
+}

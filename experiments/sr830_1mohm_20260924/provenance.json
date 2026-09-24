@@ -1,0 +1,56 @@
+[
+  {
+    "source": "coupling_20260924T101535Z.jsonl",
+    "session_id": "6ac57866166f47feb337c2c59aeef93e",
+    "protocol": "coupling",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "frequency_20260924T094934Z.jsonl",
+    "session_id": "c40efc1a2e4047a7ae1dd29824313ea5",
+    "protocol": "frequency",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "frequency_refine_20260924T095456Z.jsonl",
+    "session_id": "7269520a52ce4234a2d3db0dfeaeb3f0",
+    "protocol": "frequency_refine",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "high_gain_20260924T100005Z.jsonl",
+    "session_id": "a54e889cf404444296c1801e9b3504ca",
+    "protocol": "high_gain",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "map_20260924T100133Z.jsonl",
+    "session_id": "3b10804b1c064addb9a26d92bbe4c4a1",
+    "protocol": "map",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "map_refine_20260924T101312Z.jsonl",
+    "session_id": "8a4cf96b5c5e44ab8e0f12cc5fac1ec9",
+    "protocol": "map_refine",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "pilot_20260924T094813Z.jsonl",
+    "session_id": "c26c055c120a459e988f66b7ce915eaf",
+    "protocol": "pilot",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "voltage_check_20260924T101406Z.jsonl",
+    "session_id": "53ebc416587a42ddbe25eb6f008e9fb5",
+    "protocol": "voltage_check",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  },
+  {
+    "source": "voltage_check_20260924T102723Z.jsonl",
+    "session_id": "e804ee9073894a5a9b794cb9c6c0ff33",
+    "protocol": "voltage_check",
+    "instrument": "Stanford_Research_Systems,SR830,s/n40423,ver1.07"
+  }
+]
