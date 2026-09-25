@@ -14,6 +14,11 @@ crosspoint-specific levels inserted::
                 dev001.meta.json
                 data/   CF_/CV_/RVS_/CVS_ csv files
                 plots/  png
+                reruns/
+                    run002/  collision-safe repeat of the same device index
+                        dev001.meta.json
+                        data/
+                        plots/
 
 The device index is *derived from the directory tree* rather than held in a
 counter. Scoping it under ``<size>um`` is what makes it reset when the
@@ -36,6 +41,7 @@ _SAFE_CHARS = ("-", "_", ".", "+")
 
 #: Matches the device folders this module creates, and nothing else.
 _DEVICE_DIR_RE = re.compile(r"^dev(\d+)$")
+_RERUN_DIR_RE = re.compile(r"^run(\d+)$")
 
 
 def sanitize_filename(text: str, fallback: str = "sample") -> str:
@@ -93,6 +99,7 @@ class DeviceDirs:
     data_dir: str
     plot_dir: str
     meta_file: str
+    run_number: int = 1
 
 
 class SamplePaths:
@@ -141,6 +148,7 @@ class SamplePaths:
         return ensure_directory(self.sample_dir, f"sample '{self.sample_tag}'")
 
     def ensure_device_dirs(self, crosspoint_um: float, index: int) -> DeviceDirs:
+        """Create and return the legacy first-run layout for a device."""
         self.ensure_sample_dir()
         ensure_directory(self.size_dir(crosspoint_um), "crosspoint size")
         device_dir = ensure_directory(
@@ -152,6 +160,70 @@ class SamplePaths:
             plot_dir=ensure_directory(op.join(device_dir, "plots"), "plots"),
             meta_file=op.join(device_dir, f"{device_tag(index)}.meta.json"),
         )
+
+    def allocate_device_run_dirs(self, crosspoint_um: float, index: int) -> DeviceDirs:
+        """Allocate storage for a run without ever reusing existing output.
+
+        The first run retains the historical ``devNNN/data`` layout.  If that
+        device already contains metadata or measurement output, subsequent runs
+        are isolated under ``devNNN/reruns/run002``, ``run003``, and so on.
+        Existing rerun directories count as occupied even when empty because an
+        interrupted process may have reserved them before writing its first row.
+        """
+        first = self.ensure_device_dirs(crosspoint_um, index)
+        reruns_dir = op.join(first.device_dir, "reruns")
+        existing_reruns = self._existing_rerun_numbers(reruns_dir)
+        if not self._legacy_run_has_output(first) and not existing_reruns:
+            return first
+
+        ensure_directory(reruns_dir, "device reruns")
+        run_number = max([1] + existing_reruns) + 1
+        while True:
+            run_dir = op.join(reruns_dir, f"run{run_number:03d}")
+            try:
+                os.mkdir(run_dir)
+                break
+            except FileExistsError:
+                run_number += 1
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Failed to allocate rerun directory:\n{run_dir}\n\n{exc}"
+                ) from exc
+
+        return DeviceDirs(
+            device_dir=run_dir,
+            data_dir=ensure_directory(op.join(run_dir, "data"), "rerun data"),
+            plot_dir=ensure_directory(op.join(run_dir, "plots"), "rerun plots"),
+            meta_file=op.join(run_dir, f"{device_tag(index)}.meta.json"),
+            run_number=run_number,
+        )
+
+    @staticmethod
+    def _legacy_run_has_output(dirs: DeviceDirs) -> bool:
+        if op.exists(dirs.meta_file):
+            return True
+        for directory in (dirs.data_dir, dirs.plot_dir):
+            try:
+                if os.listdir(directory):
+                    return True
+            except OSError:
+                # Treat an unreadable directory as occupied. Reusing it would
+                # risk overwriting data that merely cannot be listed right now.
+                return True
+        return False
+
+    @staticmethod
+    def _existing_rerun_numbers(reruns_dir: str) -> List[int]:
+        try:
+            entries = os.listdir(reruns_dir)
+        except OSError:
+            return []
+        found = []
+        for entry in entries:
+            match = _RERUN_DIR_RE.match(entry)
+            if match and op.isdir(op.join(reruns_dir, entry)):
+                found.append(int(match.group(1)))
+        return sorted(found)
 
     # -- indexing -----------------------------------------------------------
 

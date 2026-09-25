@@ -9,8 +9,11 @@ pytest.importorskip("PyQt5")
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from Breakdown.app_qt.wizard import QtPrompter  # noqa: E402
+from Breakdown.app_qt.dialogs import CvsVoltageDialog  # noqa: E402
 from Breakdown.core.advisor import Recommendation  # noqa: E402
-from Breakdown.core.events import CvsVoltageContext, Instrument, StressType  # noqa: E402
+from Breakdown.core.events import (  # noqa: E402
+    CvsVoltageContext, Instrument, RateLimitContext, StressType,
+)
 
 
 @pytest.fixture(scope="module")
@@ -115,6 +118,33 @@ def test_the_chosen_stress_type_is_returned(qt_app):
     prompter.deliver(StressType.CVS)
 
     assert caller.wait() is StressType.CVS
+
+
+def test_rate_limit_confirmation_is_returned(qt_app):
+    prompter = QtPrompter(should_stop=lambda: False)
+    ctx = RateLimitContext(
+        device_index=2, stress_type=StressType.CVS,
+        requested_rate_Vps=100.0, achievable_rate_Vps=4.0,
+        point_period_s=0.1, max_step_V=0.4,
+    )
+    caller = Caller(prompter, "confirm_rate_limit", ctx).start()
+
+    prompter.deliver(True)
+
+    assert caller.wait() is True
+
+
+def test_cvs_dialog_rejects_a_custom_voltage_above_the_ceiling(qt_app):
+    ctx = CvsVoltageContext(
+        device_index=2, crosspoint_um=5.0, previous_voltage=None,
+        recommendation=Recommendation(voltage=None, basis_text="none"),
+        max_voltage_V=10.0,
+    )
+    dialog = CvsVoltageDialog(ctx)
+    dialog.custom_button.setChecked(True)
+    dialog.custom_edit.setText("10.1")
+
+    assert dialog.selected_voltage() is None
 
 
 def test_consecutive_prompts_do_not_reuse_the_previous_answer(qt_app):

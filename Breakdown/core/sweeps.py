@@ -13,6 +13,7 @@ on the per-point settle time, which is why ``settle_s`` is exposed per sweep.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import time
 from typing import Callable, List, Optional
 
@@ -32,6 +33,49 @@ def _to_float(value, default=NAN) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _read_valid_sample(analyzer: ImpedanceAnalyzer) -> dict:
+    """Retry once when the MFIA sample is missing the core measured values."""
+    problems = []
+    for _attempt in range(2):
+        try:
+            sample = analyzer.read_sample() or {}
+            required = ("param0", "param1", "frequency", "drive")
+            values = [_to_float(sample.get(key)) for key in required]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(
+                    "missing/non-finite " + ", ".join(
+                        key for key, value in zip(required, values)
+                        if not math.isfinite(value)
+                    )
+                )
+            return sample
+        except Exception as exc:
+            problems.append(str(exc))
+            # Concrete adapters own communication retries (including MFIA
+            # resubscription).  This layer uses its second attempt only when a
+            # returned payload was invalid, avoiding stacked retry loops.
+            if not isinstance(exc, ValueError):
+                raise RuntimeError(
+                    "MFIA sample read failed after its adapter retry: " + str(exc)
+                ) from exc
+    raise RuntimeError(
+        "MFIA sample failed validation twice at the same setpoint: "
+        + "; ".join(problems)
+    )
+
+
+def _half_local_point_spacing(points: List[SweepPoint], position: int) -> float:
+    """Return half the distance to the nearest adjacent sweep setpoint."""
+    distances = []
+    value = points[position].value
+    if position > 0:
+        distances.append(abs(value - points[position - 1].value))
+    if position + 1 < len(points):
+        distances.append(abs(points[position + 1].value - value))
+    positive = [distance for distance in distances if distance > 1e-12]
+    return min(positive) / 2.0 if positive else 0.0
 
 
 def _build_row(
@@ -96,18 +140,24 @@ def _run(
         analyzer.configure(mfia_params)
         analyzer.set_amplitude(amplitude_V)
 
-        for point in points:
+        for position, point in enumerate(points):
             if should_stop is not None and should_stop():
                 reason = Termination.STOPPED
                 break
 
             bias, frequency = setpoint_for(point)
             analyzer.set_frequency(frequency)
-            analyzer.set_bias(bias)
+            if sweep_variable == "bias":
+                analyzer.set_bias(
+                    bias,
+                    readback_tolerance_V=_half_local_point_spacing(points, position),
+                )
+            else:
+                analyzer.set_bias(bias)
             if settle_s > 0:
                 sleep(settle_s)
 
-            sample = analyzer.read_sample() or {}
+            sample = _read_valid_sample(analyzer)
             row = _build_row(point, sweep_variable, bias, amplitude_V, frequency,
                              sample, int(mfia_params.model), area_um2)
             emitted.append(row)

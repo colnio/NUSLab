@@ -85,7 +85,8 @@ def window(qt_app, tmp_path, monkeypatch):
     p.rvs.max_step_V = 0.1
     p.rvs.nplc = 0.1
     p.cvs.nplc = 0.1
-    p.cvs.sample_interval_s = 0.01
+    p.cvs.pre_ramp_rate_Vps = 5.0
+    p.cvs.sample_interval_s = 0.02
     p.cvs.max_duration_s = 30.0
     win.params_panel.load(p)
 

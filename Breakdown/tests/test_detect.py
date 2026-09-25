@@ -76,10 +76,10 @@ def test_negative_currents_are_judged_by_magnitude():
     assert feed(make(consecutive=2), [-1e-9, -1e-3, -1e-3]) is not None
 
 
-def test_a_dropped_reading_does_not_erase_the_evidence_around_it():
-    # NaN is what the 2400 parser yields for an overflow/garbled reading. Two
-    # genuine over-threshold points either side of one still mean breakdown.
-    assert feed(make(consecutive=2), [1e-9, 1e-3, math.nan, 1e-3]) is not None
+def test_a_dropped_reading_breaks_a_consecutive_run():
+    # The stress runner retries and aborts repeated invalid reads. A single NaN
+    # must not join two separated excursions into a false breakdown event.
+    assert feed(make(consecutive=2), [1e-9, 1e-3, math.nan, 1e-3]) is None
 
 
 def test_a_dropped_reading_alone_does_not_trigger():

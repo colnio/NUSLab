@@ -21,6 +21,7 @@ Several habits here look defensive because they are, and each one is load-bearin
 from __future__ import annotations
 
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +29,31 @@ from .mfia_nodes import extract_sample_payload
 from .params import MfiaParams
 
 MOCK_SELECTION = "Mock"
+
+# Lab idle state requested for the shared probe-station MFIA. Unlike the
+# Keithley stress source, the MFIA remains enabled between measurements.
+MFIA_IDLE_AMPLITUDE_V = 0.010
+MFIA_IDLE_BIAS_V = 0.0
+MFIA_IDLE_FREQUENCY_HZ = 100_000.0
+# Idle amplitude is non-destructive and MFIA amplitude ranges quantize more
+# coarsely near their lower end. Reject a missing/stale setting, but do not
+# abort cable handling over a sub-millivolt representation difference.
+MFIA_IDLE_AMPLITUDE_READBACK_TOLERANCE_V = 0.001
+
+# The MFIA quantizes oscillator amplitudes.  On the 50 mV setting seen on the
+# instrument, for example, LabOne reports 50.048828125 mV.  Readback validation
+# must distinguish that normal DAC quantization from a setting that was not
+# applied at all.
+AMPLITUDE_READBACK_REL_TOL = 5e-3
+AMPLITUDE_READBACK_ABS_TOL_V = 5e-5
+
+# The MFIA bias DAC reports values on a 244.140625 uV grid.  Live hardware has
+# shown that it may select the next code rather than the mathematically nearest
+# code, so allow one complete LSB plus a floating-point comparison guard.  Keep
+# this absolute: a percentage tolerance would become dangerously permissive at
+# the larger CV biases.
+BIAS_DAC_LSB_V = 0.000244140625
+BIAS_READBACK_ABS_TOL_V = BIAS_DAC_LSB_V + 1e-12
 
 
 def _zi():
@@ -205,6 +231,9 @@ class MfiaSession:
             self._unsubscribe()
             if self._snapshot is not None:
                 self._restore_state(self._snapshot)
+            # State restoration is followed by the lab's explicit idle state;
+            # the MFIA must remain enabled at 10 mV / 0 V / 100 kHz.
+            self.safe_off()
         finally:
             self.daq = None
 
@@ -215,9 +244,9 @@ class MfiaSession:
         self.ramp_step = float(mfia_params.ramp_step)
         self.ramp_wait = float(mfia_params.ramp_wait)
 
-        daq.setInt(f"{base}/enable", 1)
-        daq.setInt(f"{base}/model", int(mfia_params.model))
-        daq.setInt(f"{base}/bias/enable", 1)
+        self._set_int_required(f"{base}/enable", 1)
+        self._set_int_required(f"{base}/model", int(mfia_params.model))
+        self._set_int_required(f"{base}/bias/enable", 1)
 
         try_set_int(daq, [f"{base}/auto/bw"], int(mfia_params.auto_bw))
         try_set_int(daq, [f"{base}/auto/inputrange"], int(mfia_params.inputrange_mode))
@@ -238,30 +267,107 @@ class MfiaSession:
 
         self._subscribe()
 
-    def set_bias(self, voltage: float) -> None:
+    def set_bias(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
+        tolerance = BIAS_READBACK_ABS_TOL_V
+        if readback_tolerance_V is not None:
+            requested_tolerance = float(readback_tolerance_V)
+            if not math.isfinite(requested_tolerance) or requested_tolerance < 0:
+                raise ValueError("bias readback tolerance must be finite and non-negative")
+            tolerance = max(tolerance, requested_tolerance)
         if self._unchanged("bias", voltage):
             return
-        ramp_set_double(self.daq, f"{self.base}/bias/value", float(voltage),
-                        self.ramp_step, self.ramp_wait)
+        path = f"{self.base}/bias/value"
+        last_error = None
+        for _attempt in range(2):
+            try:
+                ramp_set_double(self.daq, path, float(voltage),
+                                self.ramp_step, self.ramp_wait)
+                self.daq.sync()
+                actual = try_get_double(self.daq, path)
+                if actual is not None and math.isclose(
+                    actual,
+                    float(voltage),
+                    rel_tol=0.0,
+                    abs_tol=tolerance,
+                ):
+                    break
+                raise RuntimeError(f"readback was {actual!r}")
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"MFIA rejected bias {voltage:g} V after two attempts: {last_error}"
+            )
         self._last["bias"] = float(voltage)
 
-    def set_amplitude(self, voltage: float) -> None:
+    def set_amplitude(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
+        absolute_tolerance = AMPLITUDE_READBACK_ABS_TOL_V
+        if readback_tolerance_V is not None:
+            requested_tolerance = float(readback_tolerance_V)
+            if not math.isfinite(requested_tolerance) or requested_tolerance < 0:
+                raise ValueError(
+                    "amplitude readback tolerance must be finite and non-negative"
+                )
+            absolute_tolerance = max(absolute_tolerance, requested_tolerance)
         if self._unchanged("amplitude", voltage):
             return
-        if set_drive_amplitude(self.daq, self.dev, self.imps, float(voltage)):
-            self._last["amplitude"] = float(voltage)
+        last_error = None
+        for _attempt in range(2):
+            try:
+                written = set_drive_amplitude(
+                    self.daq, self.dev, self.imps, float(voltage)
+                )
+                if not written:
+                    raise RuntimeError("no supported amplitude node accepted the write")
+                self.daq.sync()
+                readable = [try_get_double(self.daq, path) for path in written]
+                if not any(
+                    value is not None and math.isclose(
+                        value,
+                        float(voltage),
+                        rel_tol=AMPLITUDE_READBACK_REL_TOL,
+                        abs_tol=absolute_tolerance,
+                    )
+                    for value in readable
+                ):
+                    raise RuntimeError(f"no amplitude readback matched ({readable!r})")
+                self._last["amplitude"] = float(voltage)
+                return
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(
+            f"MFIA rejected drive amplitude {voltage:g} V after two attempts: "
+            f"{last_error}"
+        )
 
     def set_frequency(self, frequency_hz: float) -> None:
         if self._unchanged("frequency", frequency_hz):
             return
-        written = try_set_double(
-            self.daq,
-            [f"{self.base}/freq", f"{self.base}/frequency",
-             f"{self.base}/osc/freq", f"{self.base}/osc/frequency"],
-            float(frequency_hz),
+        paths = [f"{self.base}/freq", f"{self.base}/frequency",
+                 f"{self.base}/osc/freq", f"{self.base}/osc/frequency"]
+        last_error = None
+        for _attempt in range(2):
+            for path in paths:
+                try:
+                    self.daq.setDouble(path, float(frequency_hz))
+                    self.daq.sync()
+                    actual = try_get_double(self.daq, path)
+                    if actual is None or not math.isclose(
+                        actual, float(frequency_hz), rel_tol=1e-6, abs_tol=1e-6
+                    ):
+                        raise RuntimeError(f"readback was {actual!r}")
+                    self._last["frequency"] = float(frequency_hz)
+                    return
+                except Exception as exc:
+                    last_error = exc
+        raise RuntimeError(
+            f"MFIA rejected frequency {frequency_hz:g} Hz after two attempts: "
+            f"{last_error}"
         )
-        if written:
-            self._last["frequency"] = float(frequency_hz)
 
     def read_sample(self, timeout_s: float = 1.0) -> Dict[str, Any]:
         """Poll until the impedance sample arrives, retrying once on timeout."""
@@ -276,30 +382,63 @@ class MfiaSession:
             return self._poll_sample(timeout_s)
 
     def safe_off(self) -> None:
-        """Zero the bias and drive. Must never raise -- the operator is waiting."""
+        """Place the MFIA in its enabled lab-idle state.
+
+        The method keeps its protocol name because the session also drives the
+        Keithley through ``safe_off``. For the MFIA, however, the requested safe
+        state is 10 mV AC, 0 V DC, 100 kHz with impedance measurement and bias
+        enabled. Every setting is attempted even if another one fails.
+        """
         if self.daq is None:
             return
-        try:
-            ramp_set_double(self.daq, f"{self.base}/bias/value", 0.0,
-                            self.ramp_step, self.ramp_wait)
-        except Exception:
-            pass
-        for action in (
-            lambda: set_drive_amplitude(self.daq, self.dev, self.imps, 0.0),
-            lambda: self.daq.setInt(f"{self.base}/bias/enable", 0),
+        errors = []
+
+        # Force real writes and readbacks. A cached value may describe the
+        # state before close() restored the pre-run snapshot.
+        self._last = {"bias": None, "amplitude": None, "frequency": None}
+        for label, action in (
+            ("bias idle", lambda: self.set_bias(MFIA_IDLE_BIAS_V)),
+            ("frequency idle", lambda: self.set_frequency(MFIA_IDLE_FREQUENCY_HZ)),
+            ("drive idle", lambda: self.set_amplitude(
+                MFIA_IDLE_AMPLITUDE_V,
+                readback_tolerance_V=MFIA_IDLE_AMPLITUDE_READBACK_TOLERANCE_V,
+            )),
+            ("measurement enable", lambda: self._set_int_required(
+                f"{self.base}/enable", 1
+            )),
+            ("bias enable", lambda: self._set_int_required(
+                f"{self.base}/bias/enable", 1
+            )),
         ):
             try:
                 action()
-            except Exception:
-                continue
-        self._last = {"bias": 0.0, "amplitude": 0.0,
-                      "frequency": self._last.get("frequency")}
+            except Exception as exc:
+                errors.append(f"{label} failed: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     # -- internals ----------------------------------------------------------
 
     def _unchanged(self, key: str, value: float) -> bool:
         previous = self._last.get(key)
         return previous is not None and abs(previous - float(value)) <= 1e-15
+
+    def _set_int_required(self, path: str, value: int) -> None:
+        last_error = None
+        for _attempt in range(2):
+            try:
+                self.daq.setInt(path, int(value))
+                self.daq.sync()
+                actual = try_get_int(self.daq, path)
+                if actual == int(value):
+                    return
+                raise RuntimeError(f"readback was {actual!r}")
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(
+            f"MFIA rejected critical setting {path}={value} after two attempts: "
+            f"{last_error}"
+        )
 
     def _subscribe(self) -> None:
         if not self._subscribed:
@@ -332,18 +471,21 @@ class MfiaSession:
         )
 
     def _capture_state(self) -> StateSnapshot:
-        """Record the nodes we are about to change, so they can be put back."""
+        """Record non-idle nodes we change so they can be put back.
+
+        Output enable, bias enable/value, drive, and frequency are deliberately
+        excluded: close() must not replay an old disabled/output state before
+        applying the explicit lab idle state.
+        """
         base = self.base
         snapshot = StateSnapshot()
-        for path in (f"{base}/enable", f"{base}/model", f"{base}/bias/enable",
-                     f"{base}/auto/bw", f"{base}/auto/inputrange",
+        for path in (f"{base}/model", f"{base}/auto/bw", f"{base}/auto/inputrange",
                      f"{base}/demod/order", f"{base}/demod/sinc"):
             value = try_get_int(self.daq, path)
             if value is not None:
                 snapshot.int_nodes[path] = value
-        for path in (f"{base}/bias/value", f"{base}/current/range",
-                     f"{base}/demod/timeconstant", f"{base}/demod/rate",
-                     f"{base}/freq", f"{base}/drive"):
+        for path in (f"{base}/current/range", f"{base}/demod/timeconstant",
+                     f"{base}/demod/rate"):
             value = try_get_double(self.daq, path)
             if value is not None:
                 snapshot.double_nodes[path] = value
@@ -355,12 +497,20 @@ class MfiaSession:
         return snapshot
 
     def _restore_state(self, snapshot: StateSnapshot) -> None:
+        idle_int_nodes = {f"{self.base}/enable", f"{self.base}/bias/enable"}
+        idle_double_nodes = {
+            f"{self.base}/bias/value", f"{self.base}/freq", f"{self.base}/drive"
+        }
         for path, value in snapshot.int_nodes.items():
+            if path in idle_int_nodes:
+                continue
             try:
                 self.daq.setInt(path, int(value))
             except Exception:
                 continue
         for path, value in snapshot.double_nodes.items():
+            if path in idle_double_nodes:
+                continue
             try:
                 self.daq.setDouble(path, float(value))
             except Exception:

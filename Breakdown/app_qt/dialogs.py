@@ -8,6 +8,8 @@ about to touch.
 
 from __future__ import annotations
 
+import math
+
 from typing import Optional
 
 from PyQt5.QtCore import Qt
@@ -27,7 +29,7 @@ from PyQt5.QtWidgets import (
 
 from Breakdown.core.events import CvsVoltageContext, Instrument, StressType
 
-from .theme import TEXT_DIM, TEXT_FAINT, WAIT, Card
+from .theme import Card
 
 CVS_GUIDANCE = """\
 How to choose a constant-voltage stress level
@@ -69,16 +71,18 @@ class CableSwapDialog(QDialog):
         layout.setSpacing(14)
 
         headline = QLabel(f"Connect the probes to the {target.value}")
-        headline.setStyleSheet(
-            f"font-size: 19px; font-weight: 700; color: {WAIT};"
-        )
+        headline.setObjectName("WarningText")
+        headline_font = headline.font()
+        headline_font.setPointSize(14)
+        headline_font.setBold(True)
+        headline.setFont(headline_font)
         headline.setWordWrap(True)
         layout.addWidget(headline)
 
         detail = QLabel(
             f"Device {device_index}.\n\n"
-            f"Both instruments have already been driven to 0 V and their outputs "
-            f"opened, so it is safe to change the wiring now.\n\n"
+            f"The Keithley is at 0 V with its output off. The MFIA is in its "
+            f"enabled idle state: 0 V DC bias, 10 mV AC, 100 kHz.\n\n"
             f"Leave the probe needles where they are — only the instrument cables "
             f"move."
         )
@@ -135,7 +139,7 @@ class StressTypeDialog(QDialog):
                 "crosspoint size. Run an RVS device first."
             )
             note.setWordWrap(True)
-            note.setStyleSheet(f"color: {WAIT};")
+            note.setObjectName("WarningText")
             layout.addWidget(note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -182,16 +186,19 @@ class CvsVoltageDialog(QDialog):
         # 2. derived from the ramps measured so far
         self.recommended_button = QRadioButton()
         recommended = ctx.recommendation.voltage
-        if recommended is not None:
+        if (recommended is not None and math.isfinite(float(recommended))
+                and 0 < float(recommended) <= float(ctx.max_voltage_V)):
             self.recommended_button.setText(f"Recommended:  {recommended:.4g} V")
         else:
-            self.recommended_button.setText("Recommended (not available)")
+            reason = "above safety ceiling" if recommended is not None else "not available"
+            self.recommended_button.setText(f"Recommended ({reason})")
             self.recommended_button.setEnabled(False)
         choice_layout.addWidget(self.recommended_button)
 
         basis = QLabel(ctx.recommendation.basis_text)
         basis.setWordWrap(True)
-        basis.setStyleSheet(f"color: {TEXT_FAINT}; margin-left: 24px;")
+        basis.setObjectName("FaintText")
+        basis.setContentsMargins(24, 0, 0, 0)
         choice_layout.addWidget(basis)
 
         # 3. type one
@@ -210,21 +217,21 @@ class CvsVoltageDialog(QDialog):
                        self.custom_button):
             self.group.addButton(button)
         layout.addWidget(choices)
+        limit = QLabel(f"Hard safety ceiling: {ctx.max_voltage_V:g} V")
+        limit.setObjectName("MutedText")
+        layout.addWidget(limit)
 
         if ctx.recommendation.warnings:
             warning = QLabel("\n".join(f"- {w}" for w in ctx.recommendation.warnings))
             warning.setWordWrap(True)
-            warning.setStyleSheet(
-                f"color: {WAIT}; background: #2A2107; border: 1px solid #4A3A0C;"
-                f" border-radius: 5px; padding: 8px 10px;"
-            )
+            warning.setObjectName("WarningPanel")
             layout.addWidget(warning)
 
         if ctx.records:
             measured = ", ".join(f"{r.v_bd:.3g}" for r in ctx.records)
             summary = QLabel(f"Measured V_BD so far ({len(ctx.records)}): {measured} V")
             summary.setWordWrap(True)
-            summary.setStyleSheet(f"color: {TEXT_DIM};")
+            summary.setObjectName("MutedText")
             layout.addWidget(summary)
 
         self.guidance = QTextEdit()
@@ -266,19 +273,26 @@ class CvsVoltageDialog(QDialog):
 
     def selected_voltage(self) -> Optional[float]:
         if self.previous_button.isChecked():
-            return self.ctx.previous_voltage
-        if self.recommended_button.isChecked():
-            return self.ctx.recommendation.voltage
-        try:
-            from KeithleyGUI.ui_helpers import parse_numeric_text
+            value = self.ctx.previous_voltage
+        elif self.recommended_button.isChecked():
+            value = self.ctx.recommendation.voltage
+        else:
+            try:
+                from KeithleyGUI.ui_helpers import parse_numeric_text
 
-            value = abs(parse_numeric_text(self.custom_edit.text(), "Stress voltage"))
-        except Exception:
-            self.custom_edit.setProperty("invalid", True)
-            self.custom_edit.style().unpolish(self.custom_edit)
-            self.custom_edit.style().polish(self.custom_edit)
+                value = abs(parse_numeric_text(
+                    self.custom_edit.text(), "Stress voltage"
+                ))
+            except Exception:
+                self.custom_edit.setProperty("invalid", True)
+                self.custom_edit.style().unpolish(self.custom_edit)
+                self.custom_edit.style().polish(self.custom_edit)
+                return None
+        if value is None:
             return None
-        if value <= 0:
+        value = abs(float(value))
+        if (not math.isfinite(value) or value <= 0
+                or value > float(self.ctx.max_voltage_V)):
             self.custom_edit.setProperty("invalid", True)
             self.custom_edit.style().unpolish(self.custom_edit)
             self.custom_edit.style().polish(self.custom_edit)

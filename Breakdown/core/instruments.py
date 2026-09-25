@@ -20,7 +20,8 @@ class SourceMeter(Protocol):
     """A voltage source with a current measurement -- the Keithley 2400's role."""
 
     def configure(
-        self, nplc: float, compliance_A: float, current_autorange: bool = False
+        self, nplc: float, compliance_A: float, current_autorange: bool = False,
+        source_delay_s: float = 0.0,
     ) -> None:
         ...
 
@@ -34,7 +35,7 @@ class SourceMeter(Protocol):
         ...
 
     def safe_off(self) -> None:
-        """Drive to zero and open the output. Must never raise."""
+        """Attempt zero and output-off; raise only after attempting both."""
 
     def close(self) -> None:
         ...
@@ -47,10 +48,14 @@ class ImpedanceAnalyzer(Protocol):
     def configure(self, mfia_params: Any) -> None:
         ...
 
-    def set_bias(self, voltage: float) -> None:
+    def set_bias(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
         ...
 
-    def set_amplitude(self, voltage: float) -> None:
+    def set_amplitude(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
         ...
 
     def set_frequency(self, frequency_hz: float) -> None:
@@ -64,7 +69,11 @@ class ImpedanceAnalyzer(Protocol):
         """
 
     def safe_off(self) -> None:
-        """Zero the bias and drive. Must never raise."""
+        """Apply the analyzer's defined safe idle state.
+
+        The MFIA implementation intentionally remains enabled at 10 mV AC,
+        0 V DC bias, and 100 kHz.
+        """
 
     def close(self) -> None:
         ...

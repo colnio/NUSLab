@@ -56,8 +56,12 @@ the Setup tab.
 | `cvs_only` | **RVS** | CVS | CVS | ... |
 | `manual` | you choose | you choose | you choose | ... |
 
-The first device always ramps, even in `cvs_only`: a stress level cannot be
-chosen without at least one measured V_BD.
+Device 1 always ramps in `cvs_only`. Alternating mode remains strict even when
+an RVS device survives its ceiling: the next even-numbered device is still CVS,
+and the operator must enter a custom safe voltage because no statistics-based
+recommendation is available. The program never silently substitutes another
+RVS. Valid RVS history and the previous CVS voltage are restored when the same
+date/sample/crosspoint campaign is reopened.
 
 ## Sweep shapes
 
@@ -83,8 +87,9 @@ The dialog offers three ways to answer, every time:
 
 ## Safety
 
-- Both instruments are driven to zero and their outputs opened **before every
-  prompt**, from `finally` blocks — the operator is about to handle the wiring.
+- Before every cable prompt, the Keithley is driven to zero with its output
+  opened. The MFIA is returned to the lab's enabled idle state: 10 mV AC,
+  0 V DC bias, and 100 kHz. Cleanup runs from `finally` blocks.
 - Breakdown detection uses an **absolute current threshold**, confirmed over two
   consecutive points so a single noisy sample cannot end a device. The run
   refuses to start if that threshold is at or above compliance, since breakdown
@@ -93,6 +98,14 @@ The dialog offers three ways to answer, every time:
   energised on a probe.
 - Stop is checked every point, and also releases a prompt that is waiting on
   screen.
+- Every CVS voltage is checked against the run's hard voltage ceiling in both
+  the dialog and the core engine.
+- Before destructive stress, three zero-volt reads calibrate the Keithley's real
+  timing. If the requested ramp or sampling cadence is not achievable, the
+  operator must explicitly accept the calibrated rate.
+- Invalid instrument reads and critical setting failures get one retry. A
+  repeated fault safely aborts the campaign while retaining partial data and
+  lifecycle metadata.
 
 ## Layout
 

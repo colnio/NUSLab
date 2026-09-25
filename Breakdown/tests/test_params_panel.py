@@ -82,3 +82,13 @@ def test_an_unreadable_number_is_reported_rather_than_swallowed(qt_app):
     problems = window.params_panel.apply_to(BreakdownParams())
 
     assert any("Ramp rate" in p for p in problems)
+
+
+def test_active_device_updates_the_next_device_header(qt_app):
+    window = BreakdownWindow()
+    window.header_device.setText("6")
+
+    window._on_device_started(7, 5.0)
+
+    assert window.progress_label.text() == "Device 7  (5 um)"
+    assert window.header_device.text() == "8"

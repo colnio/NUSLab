@@ -6,7 +6,7 @@ import pytest
 
 from Breakdown.core import params as P
 from Breakdown.core import session as SE
-from Breakdown.core.events import Instrument, StressType
+from Breakdown.core.events import Instrument, SessionListener, StressType
 from Breakdown.core.mock import MockImpedanceAnalyzer, MockSourceMeter
 
 
@@ -41,6 +41,7 @@ class RecordingPrompter:
         self.calls = []
         self.swap_targets = []
         self.cvs_contexts = []
+        self.rate_limit_contexts = []
         #: (mfia_safe_offs, smu_safe_offs) observed at each swap prompt.
         self.safe_off_at_swap = []
 
@@ -61,6 +62,11 @@ class RecordingPrompter:
     def choose_stress_type(self, device_index):
         self.calls.append(("stress_type", device_index))
         return self.forced_stress_type
+
+    def confirm_rate_limit(self, ctx):
+        self.calls.append(("rate_limit", ctx.device_index))
+        self.rate_limit_contexts.append(ctx)
+        return True
 
 
 def build(tmp_path, mode="alternating", **param_overrides):
@@ -120,6 +126,17 @@ def test_alternating_mode_swaps_stress_type_each_device(tmp_path):
         ["RVS", "CVS", "RVS", "CVS"]
 
 
+def test_alternating_mode_keeps_the_cvs_slot_when_no_breakdown_was_seen(tmp_path):
+    session, prompter, smu, _, _ = build(tmp_path, mode="alternating")
+    smu.nominal_v_bd = 50.0
+    smu.renew()
+
+    session.run(device_limit=2)
+
+    assert [r["stress_type"] for r in session.summary_rows] == ["RVS", "CVS"]
+    assert prompter.cvs_contexts[0].recommendation.voltage is None
+
+
 def test_cvs_only_mode_still_ramps_the_first_device(tmp_path):
     # A CVS level cannot be chosen without at least one measured V_BD.
     session, _, _, _, _ = build(tmp_path, mode="cvs_only")
@@ -128,6 +145,16 @@ def test_cvs_only_mode_still_ramps_the_first_device(tmp_path):
 
     assert [r["stress_type"] for r in session.summary_rows] == \
         ["RVS", "CVS", "CVS"]
+
+
+def test_cvs_only_uses_cvs_after_device_one_even_without_vbd(tmp_path):
+    session, _, smu, _, _ = build(tmp_path, mode="cvs_only")
+    smu.nominal_v_bd = 50.0
+    smu.renew()
+
+    session.run(device_limit=2)
+
+    assert [r["stress_type"] for r in session.summary_rows] == ["RVS", "CVS"]
 
 
 def test_manual_mode_asks_before_every_device(tmp_path):
@@ -190,6 +217,23 @@ def test_declining_a_cable_swap_aborts_the_run(tmp_path):
     assert result.devices_completed == 0
 
 
+def test_declining_the_final_swap_counts_the_stressed_device(tmp_path):
+    session, prompter, _, _, _ = build(tmp_path, mode="rvs_only")
+    answers = iter((True, False))
+
+    def answer(target, device_index):
+        prompter.swap_targets.append(target)
+        return next(answers)
+
+    prompter.confirm_cable_swap = answer
+
+    result = session.run(device_limit=1)
+
+    assert result.reason == SE.RunOutcome.ABORTED
+    assert result.devices_completed == 1
+    assert len(read_summary(tmp_path)) == 1
+
+
 def test_no_cable_swap_is_requested_when_no_capacitance_is_measured(tmp_path):
     # With both MFIA sweeps off the cables never need to move.
     session, prompter, _, _, _ = build(tmp_path, mode="rvs_only",
@@ -208,6 +252,17 @@ def test_the_operator_is_asked_for_the_stress_voltage_before_every_cvs(tmp_path)
     session.run(device_limit=4)
 
     assert [c[1] for c in prompter.calls if c[0] == "cvs_voltage"] == [2, 4]
+
+
+def test_declining_a_calibrated_rate_limit_aborts_before_cvs(tmp_path):
+    session, prompter, _, _, _ = build(tmp_path, mode="alternating")
+    prompter.confirm_rate_limit = lambda ctx: False
+
+    result = session.run(device_limit=2)
+
+    assert result.reason == SE.RunOutcome.ABORTED
+    assert result.devices_completed == 1
+    assert [r["stress_type"] for r in session.summary_rows] == ["RVS"]
 
 
 def test_the_chosen_stress_voltage_is_the_one_applied(tmp_path):
@@ -261,6 +316,24 @@ def test_declining_to_pick_a_stress_voltage_aborts_the_run(tmp_path):
     assert result.devices_completed == 1
 
 
+def test_cvs_voltage_cannot_exceed_the_absolute_ceiling(tmp_path):
+    session, prompter, _, _, _ = build(tmp_path, mode="alternating")
+    prompter.cvs_voltage = 20.1
+
+    with pytest.raises(ValueError, match="absolute ceiling"):
+        session.run(device_limit=2)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_cvs_voltage_must_be_finite(tmp_path, value):
+    session, prompter, _, _, _ = build(tmp_path, mode="manual")
+    prompter.forced_stress_type = StressType.CVS
+    prompter.cvs_voltage = value
+
+    with pytest.raises(ValueError, match="finite"):
+        session.run(device_limit=1)
+
+
 def test_the_stress_prompt_only_offers_records_of_the_matching_size(tmp_path):
     session, prompter, _, _, _ = build(tmp_path, mode="alternating")
 
@@ -294,6 +367,23 @@ def test_stopping_leaves_both_instruments_safe(tmp_path):
     session.run(device_limit=2)
 
     assert smu.safe_off_calls >= 1 and mfia.safe_off_calls >= 1
+    assert smu.voltage == pytest.approx(0.0) and not smu.output_enabled
+    assert mfia.bias == pytest.approx(0.0)
+    assert mfia.amplitude == pytest.approx(0.010)
+    assert mfia.frequency == pytest.approx(100_000.0)
+    assert mfia.output_enabled
+
+
+def test_mfia_idle_failure_detail_is_preserved_in_the_campaign_error(tmp_path):
+    session, _, _, mfia, _ = build(tmp_path, mode="rvs_only")
+
+    def fail_idle_state():
+        raise RuntimeError("drive idle failed: readback was 0.05")
+
+    mfia.safe_off = fail_idle_state
+
+    with pytest.raises(RuntimeError, match="drive idle failed: readback was 0.05"):
+        session.run(device_limit=1)
 
 
 # --- indexing --------------------------------------------------------------
@@ -314,6 +404,29 @@ def test_a_second_run_continues_the_numbering(tmp_path):
     second.run(device_limit=1)
 
     assert int(second.summary_rows[0]["device_index"]) == 3
+
+
+def test_a_restart_restores_rvs_history_for_the_next_cvs_prompt(tmp_path):
+    first, _, _, _, _ = build(tmp_path, mode="rvs_only")
+    first.run(device_limit=1)
+    second, prompter, _, _, _ = build(tmp_path, mode="alternating")
+
+    second.run(device_limit=1)
+
+    assert second.summary_rows[0]["stress_type"] == "CVS"
+    assert len(prompter.cvs_contexts[0].records) == 1
+    assert prompter.cvs_contexts[0].recommendation.voltage is not None
+
+
+def test_a_restart_restores_the_previous_cvs_voltage(tmp_path):
+    first, prompter, _, _, _ = build(tmp_path, mode="alternating")
+    prompter.cvs_voltage = 3.2
+    first.run(device_limit=2)
+    second, second_prompter, _, _, _ = build(tmp_path, mode="cvs_only")
+
+    second.run(device_limit=1)
+
+    assert second_prompter.cvs_contexts[0].previous_voltage == pytest.approx(3.2)
 
 
 def test_a_manual_starting_index_is_respected(tmp_path):
@@ -337,6 +450,33 @@ def test_every_measurement_is_written_to_its_own_file(tmp_path):
     assert kinds == ["CF", "CV", "RVS"]
 
 
+def test_restarting_an_existing_device_preserves_the_first_run(tmp_path):
+    first_session, _, _, _, _ = build(tmp_path, mode="rvs_only")
+    first_session.run(device_limit=1)
+    device_dir = tmp_path / "2026-08-13" / "waferB" / "5um" / "dev001"
+    original_files = {
+        path.name: path.read_bytes() for path in (device_dir / "data").iterdir()
+    }
+    original_meta = (device_dir / "dev001.meta.json").read_bytes()
+
+    rerun_session, _, _, _, _ = build(tmp_path, mode="rvs_only")
+    rerun_session.set_next_index(1)
+    rerun_session.run(device_limit=1)
+
+    assert {
+        path.name: path.read_bytes() for path in (device_dir / "data").iterdir()
+    } == original_files
+    assert (device_dir / "dev001.meta.json").read_bytes() == original_meta
+    rerun_dir = device_dir / "reruns" / "run002"
+    assert sorted(path.name.split("_")[0] for path in (rerun_dir / "data").iterdir()) == [
+        "CF", "CV", "RVS"
+    ]
+    rerun_meta = json.loads((rerun_dir / "dev001.meta.json").read_text())
+    assert rerun_meta["device_index"] == 1
+    assert rerun_meta["run_number"] == 2
+    assert len(read_summary(tmp_path)) == 2
+
+
 def test_the_device_folder_carries_its_own_metadata(tmp_path):
     session, _, _, _, _ = build(tmp_path, mode="rvs_only")
 
@@ -347,6 +487,33 @@ def test_the_device_folder_carries_its_own_metadata(tmp_path):
     assert payload["device_index"] == 1
     assert payload["stress_type"] == "RVS"
     assert payload["parameters"]["sample"]["sample_name"] == "waferB"
+    assert payload["status"] == "completed"
+    assert payload["failure_reason"] is None
+
+
+def test_an_aborted_device_keeps_lifecycle_metadata(tmp_path):
+    session, prompter, _, _, _ = build(tmp_path, mode="rvs_only")
+    prompter.accept_swaps = False
+
+    session.run(device_limit=1)
+
+    path = tmp_path / "2026-08-13" / "waferB" / "5um" / "dev001" / "dev001.meta.json"
+    payload = json.loads(path.read_text())
+    assert payload["status"] == "aborted"
+    assert "swap" in payload["failure_reason"].lower()
+
+
+def test_live_run_uses_a_frozen_parameter_snapshot(tmp_path):
+    session, _, _, _, params = build(tmp_path, mode="rvs_only")
+
+    class Mutator(SessionListener):
+        def on_device_started(self, *_args):
+            params.rvs.v_max = 0.1
+
+    session.listener = Mutator()
+    session.run(device_limit=1)
+
+    assert float(session.summary_rows[0]["V_BD_V"]) > 0.1
 
 
 def test_the_summary_gains_a_row_per_device(tmp_path):

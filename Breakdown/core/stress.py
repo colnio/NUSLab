@@ -16,16 +16,109 @@ testable against :mod:`Breakdown.core.mock`.
 from __future__ import annotations
 
 import time
+import math
+import sys
 from typing import Callable, List, Optional
 
 from .detect import BreakdownCriterion, BreakdownDetector
 from .instruments import SourceMeter, StressResult, Termination
 from .models import per_area
-from .ramp import build_ramp_values, plan_ramp
+from .ramp import RampPlan, build_ramp_values, plan_ramp, point_period_s
 from .params import CVSParams, RVSParams
 
 PointCallback = Callable[[dict], None]
 StopCheck = Callable[[], bool]
+
+
+def _safe_output_off(smu: SourceMeter) -> None:
+    """Attempt zero and output-off independently so one failure cannot mask the other."""
+    zero_error = off_error = None
+    try:
+        smu.set_voltage(0.0)
+    except Exception as exc:
+        zero_error = exc
+    try:
+        smu.output_off()
+    except Exception as exc:
+        off_error = exc
+    cleanup_error = off_error or zero_error
+    if cleanup_error is not None and sys.exc_info()[0] is None:
+        action = "disable output" if off_error is not None else "drive to zero"
+        raise RuntimeError(f"Could not {action}: {cleanup_error}") from cleanup_error
+
+
+def _read_vi_with_retry(smu: SourceMeter):
+    """Retry one failed/invalid current read at the unchanged setpoint."""
+    problems = []
+    for _attempt in range(2):
+        try:
+            measured_v, current = smu.read_vi()
+            current = float(current)
+            measured_v = float(measured_v)
+            if not math.isfinite(current):
+                raise ValueError("current reading is not finite")
+            if not math.isfinite(measured_v) and _attempt == 0:
+                raise ValueError("voltage reading is not finite")
+            return measured_v, current
+        except Exception as exc:
+            problems.append(str(exc))
+    raise RuntimeError(
+        "SMU read failed twice at the same setpoint: " + "; ".join(problems)
+    )
+
+
+def calibrate_smu_point_period(
+    smu: SourceMeter,
+    nplc: float,
+    compliance_A: float,
+    current_autorange: bool,
+    source_delay_s: float = 0.0,
+    clock: Callable[[], float] = time.perf_counter,
+    samples: int = 3,
+) -> float:
+    """Measure the real zero-volt read cycle used to plan a destructive ramp."""
+    durations = []
+    try:
+        smu.configure(
+            nplc=nplc,
+            compliance_A=compliance_A,
+            current_autorange=current_autorange,
+            source_delay_s=source_delay_s,
+        )
+        smu.set_voltage(0.0)
+        for _ in range(max(1, int(samples))):
+            started = clock()
+            _read_vi_with_retry(smu)
+            elapsed = clock() - started
+            if math.isfinite(elapsed) and elapsed > 0:
+                durations.append(elapsed)
+    finally:
+        _safe_output_off(smu)
+    theoretical = point_period_s(nplc, source_delay_s)
+    if not durations:
+        return theoretical
+    durations.sort()
+    return max(theoretical, durations[len(durations) // 2])
+
+
+def plan_for_calibrated_period(
+    rate_Vps: float,
+    max_step_V: float,
+    nplc: float,
+    source_delay_s: float,
+    calibrated_period_s: float,
+) -> RampPlan:
+    integration_and_delay = point_period_s(
+        nplc, source_delay_s, bus_overhead_s=0.0
+    )
+    measured_overhead = max(0.0, float(calibrated_period_s) - integration_and_delay)
+    return plan_ramp(
+        rate_Vps=rate_Vps,
+        max_step_V=max_step_V,
+        nplc=nplc,
+        source_delay_s=source_delay_s,
+        bus_overhead_s=measured_overhead,
+    )
 
 
 def _row(
@@ -59,6 +152,7 @@ def run_rvs(
     should_stop: Optional[StopCheck] = None,
     clock: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
+    ramp_plan: Optional[RampPlan] = None,
 ) -> StressResult:
     """Ramp until breakdown or the ceiling, then drive safely to zero.
 
@@ -66,7 +160,7 @@ def run_rvs(
     delivered is measured and reported, because V_BD depends on it.
     """
     polarity = 1 if params.polarity >= 0 else -1
-    plan = plan_ramp(
+    plan = ramp_plan or plan_ramp(
         rate_Vps=params.ramp_rate_Vps,
         max_step_V=params.max_step_V,
         nplc=params.nplc,
@@ -84,33 +178,48 @@ def run_rvs(
     reason = Termination.CEILING_REACHED
     count = 0
     started = clock()
-    first_v: Optional[float] = None
     last_v = abs(params.v_start)
+    ramp_started: Optional[float] = None
+    last_set_at: Optional[float] = None
 
     try:
         smu.configure(
             nplc=params.nplc,
             compliance_A=params.compliance_A,
             current_autorange=params.current_autorange,
+            source_delay_s=params.source_delay_s,
         )
+        ramp_started = clock()
         for magnitude in setpoints:
             if should_stop is not None and should_stop():
                 reason = Termination.STOPPED
                 break
 
+            due = ramp_started + abs(magnitude - abs(params.v_start)) / plan.achievable_rate_Vps
+            remaining = due - clock()
+            if remaining > 0:
+                sleep(remaining)
             target = polarity * magnitude
             smu.set_voltage(target)
-            sleep(plan.dwell_s)
-            measured_v, current = smu.read_vi()
+            last_set_at = clock()
+            measured_v, current = _read_vi_with_retry(smu)
 
             elapsed = clock() - started
-            if first_v is None:
-                first_v = magnitude
             last_v = magnitude
 
             event = detector.update(
-                index=count, voltage=target, current=current, elapsed_s=elapsed
+                index=count,
+                voltage=measured_v if math.isfinite(measured_v) else target,
+                current=current,
+                elapsed_s=elapsed,
             )
+            if not math.isfinite(measured_v) and not any(
+                "measured voltage" in note for note in notes
+            ):
+                notes.append(
+                    "The SMU returned a non-finite measured voltage; V_BD used "
+                    "the commanded setpoint for affected points."
+                )
             if on_point is not None:
                 on_point(
                     _row("ramp", count, target, measured_v, current, elapsed,
@@ -125,13 +234,22 @@ def run_rvs(
         # Runs on the success path, the stop path, and on any instrument error.
         # A device left energised after a failure is the one outcome that must
         # not happen.
-        smu.set_voltage(0.0)
-        smu.output_off()
+        _safe_output_off(smu)
 
     duration = clock() - started
     event = detector.event
-    span = abs(last_v - (first_v if first_v is not None else abs(params.v_start)))
-    achieved = (span / duration) if duration > 0 else None
+    span = abs(last_v - abs(params.v_start))
+    ramp_elapsed = (
+        last_set_at - ramp_started
+        if last_set_at is not None and ramp_started is not None else 0.0
+    )
+    achieved = (span / ramp_elapsed) if ramp_elapsed > 0 else None
+    if (achieved is not None
+            and achieved < float(params.ramp_rate_Vps) * 0.9):
+        notes.append(
+            f"Actual ramp rate was {achieved:.4g} V/s versus the requested "
+            f"{params.ramp_rate_Vps:g} V/s."
+        )
 
     return StressResult(
         stress_type="RVS",
@@ -159,6 +277,7 @@ def run_cvs(
     should_stop: Optional[StopCheck] = None,
     clock: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
+    pre_ramp_plan: Optional[RampPlan] = None,
 ) -> StressResult:
     """Ramp quickly to ``v_stress``, then hold until breakdown or the time limit.
 
@@ -170,14 +289,14 @@ def run_cvs(
     not from the start of the run.
     """
     magnitude = abs(float(v_stress))
-    if magnitude <= 0:
-        raise ValueError("CVS stress voltage must be greater than 0 V.")
+    if not math.isfinite(magnitude) or magnitude <= 0:
+        raise ValueError("CVS stress voltage must be finite and greater than 0 V.")
     sign = 1 if polarity >= 0 else -1
 
     detector = BreakdownDetector(
         BreakdownCriterion(i_threshold_A=params.i_bd_A, consecutive=2)
     )
-    pre_ramp_plan = plan_ramp(
+    pre_ramp_plan = pre_ramp_plan or plan_ramp(
         rate_Vps=params.pre_ramp_rate_Vps,
         max_step_V=max(magnitude / 10.0, 1e-3),
         nplc=params.nplc,
@@ -195,19 +314,27 @@ def run_cvs(
             nplc=params.nplc,
             compliance_A=params.compliance_A,
             current_autorange=params.current_autorange,
+            source_delay_s=0.0,
         )
 
         # -- pre-ramp -------------------------------------------------------
+        pre_ramp_started = clock()
         for step in build_ramp_values(0.0, magnitude, pre_ramp_plan.step_V):
             if should_stop is not None and should_stop():
                 reason, stopped = Termination.STOPPED, True
                 break
+            due = pre_ramp_started + step / pre_ramp_plan.achievable_rate_Vps
+            remaining = due - clock()
+            if remaining > 0:
+                sleep(remaining)
             smu.set_voltage(sign * step)
-            sleep(pre_ramp_plan.dwell_s)
-            measured_v, current = smu.read_vi()
+            measured_v, current = _read_vi_with_retry(smu)
             elapsed = clock() - started
             event = detector.update(
-                index=count, voltage=sign * step, current=current, elapsed_s=elapsed
+                index=count,
+                voltage=measured_v if math.isfinite(measured_v) else sign * step,
+                current=current,
+                elapsed_s=elapsed,
             )
             if on_point is not None:
                 on_point(
@@ -227,7 +354,11 @@ def run_cvs(
 
         # -- hold -----------------------------------------------------------
         if not stopped:
+            # A single excursion at the end of the approach must not combine
+            # with a hold sample or give t_BD a pre-ramp time origin.
+            detector.reset()
             hold_started = clock()
+            hold_sample = 1
             while True:
                 if should_stop is not None and should_stop():
                     reason = Termination.STOPPED
@@ -235,14 +366,21 @@ def run_cvs(
                 if clock() - hold_started >= params.max_duration_s:
                     reason = Termination.DURATION_REACHED
                     break
+                due = hold_started + hold_sample * params.sample_interval_s
+                if due - hold_started > params.max_duration_s:
+                    reason = Termination.DURATION_REACHED
+                    break
 
+                remaining = due - clock()
+                if remaining > 0:
+                    sleep(remaining)
                 smu.set_voltage(sign * magnitude)
-                sleep(params.sample_interval_s)
-                measured_v, current = smu.read_vi()
+                measured_v, current = _read_vi_with_retry(smu)
                 elapsed = clock() - started
                 event = detector.update(
                     index=count,
-                    voltage=sign * magnitude,
+                    voltage=(measured_v if math.isfinite(measured_v)
+                             else sign * magnitude),
                     current=current,
                     elapsed_s=clock() - hold_started,
                 )
@@ -252,12 +390,12 @@ def run_cvs(
                              elapsed, area_um2, event is not None)
                     )
                 count += 1
+                hold_sample += 1
                 if event is not None:
                     reason = Termination.BREAKDOWN
                     break
     finally:
-        smu.set_voltage(0.0)
-        smu.output_off()
+        _safe_output_off(smu)
 
     duration = clock() - started
     event = detector.event
@@ -268,7 +406,8 @@ def run_cvs(
         bd_detected=event is not None,
         v_bd=event.voltage if event else None,
         i_bd=event.current if event else None,
-        t_bd=event.elapsed_s if event else None,
+        t_bd=(event.elapsed_s if event is not None and hold_started is not None
+              else None),
         v_stress=sign * magnitude,
         requested_rate_Vps=None,
         achieved_rate_Vps=None,

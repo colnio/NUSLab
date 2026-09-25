@@ -18,17 +18,15 @@ from typing import Dict, List
 import pyqtgraph as pg
 from PyQt5.QtWidgets import QGridLayout, QWidget
 
-from .theme import BORDER, DANGER, FOCUS, SURFACE, TEXT_DIM, TEXT_FAINT
-
-CURRENT_PEN = pg.mkPen(color=FOCUS, width=2)
-PREVIOUS_PEN = pg.mkPen(color=(94, 107, 124, 110), width=1)
-BREAKDOWN_BRUSH = pg.mkBrush(DANGER)
+from .theme import current_theme, normalize_theme, theme_colors
 
 
 class PlotPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        pg.setConfigOptions(antialias=True, background=SURFACE, foreground=TEXT_DIM)
+        pg.setConfigOptions(antialias=True)
+        self._theme_name = current_theme()
+        self._plot_specs = {}
 
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -50,16 +48,51 @@ class PlotPanel(QWidget):
 
     def _make_plot(self, title, x_label, y_label, log_x=False, log_y=False):
         widget = pg.PlotWidget()
-        widget.setTitle(title, color=TEXT_DIM, size="10pt")
-        widget.setLabel("bottom", x_label, color=TEXT_FAINT)
-        widget.setLabel("left", y_label, color=TEXT_FAINT)
+        self._plot_specs[widget] = (title, x_label, y_label)
         widget.setLogMode(x=log_x, y=log_y)
         widget.showGrid(x=True, y=True, alpha=0.14)
-        widget.setStyleSheet(f"border: 1px solid {BORDER}; border-radius: 6px;")
-        for axis in ("bottom", "left"):
-            widget.getAxis(axis).setPen(pg.mkPen(BORDER))
-            widget.getAxis(axis).setTextPen(pg.mkPen(TEXT_FAINT))
+        self._style_plot(widget)
         return widget
+
+    def _style_plot(self, widget) -> None:
+        title, x_label, y_label = self._plot_specs[widget]
+        colours = theme_colors(self._theme_name)
+        widget.setBackground(colours.surface)
+        widget.setTitle(title, color=colours.text_dim, size="10pt")
+        widget.setLabel("bottom", x_label, color=colours.text_faint)
+        widget.setLabel("left", y_label, color=colours.text_faint)
+        widget.setStyleSheet(
+            f"border: 1px solid {colours.border}; border-radius: 6px;"
+        )
+        for axis in ("bottom", "left"):
+            widget.getAxis(axis).setPen(pg.mkPen(colours.border))
+            widget.getAxis(axis).setTextPen(pg.mkPen(colours.text_faint))
+
+    def apply_theme(self, theme_name: str) -> None:
+        """Restyle existing axes, curves, and markers without losing data."""
+        self._theme_name = normalize_theme(theme_name)
+        current_curves = set(self._curves.values())
+        markers = set(self._markers.values())
+        for plot in self._plot_specs:
+            self._style_plot(plot)
+            for item in plot.listDataItems():
+                if item in current_curves:
+                    item.setPen(self._current_pen())
+                elif item not in markers:
+                    item.setPen(self._previous_pen())
+        for marker in markers:
+            marker.setBrush(self._breakdown_brush())
+
+    def _current_pen(self):
+        return pg.mkPen(color=theme_colors(self._theme_name).focus, width=2)
+
+    def _previous_pen(self):
+        return pg.mkPen(
+            color=theme_colors(self._theme_name).plot_previous, width=1
+        )
+
+    def _breakdown_brush(self):
+        return pg.mkBrush(theme_colors(self._theme_name).danger)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -73,7 +106,7 @@ class PlotPanel(QWidget):
     def reset_device(self) -> None:
         """Fade the finished device's traces and start fresh curves."""
         for curve in self._curves.values():
-            curve.setPen(PREVIOUS_PEN)
+            curve.setPen(self._previous_pen())
             curve.setZValue(-1)
         self._curves = {}
         self._markers = {}
@@ -117,7 +150,7 @@ class PlotPanel(QWidget):
         if plot is None:
             return
         scatter = pg.ScatterPlotItem([x], [y], size=13, symbol="x",
-                                     brush=BREAKDOWN_BRUSH, pen=None)
+                                     brush=self._breakdown_brush(), pen=None)
         plot.addItem(scatter)
         self._markers[phase] = scatter
 
@@ -130,6 +163,6 @@ class PlotPanel(QWidget):
                 continue
             curve = self._curves.get(phase)
             if curve is None:
-                curve = plots[phase].plot([], [], pen=CURRENT_PEN)
+                curve = plots[phase].plot([], [], pen=self._current_pen())
                 self._curves[phase] = curve
             curve.setData(xs, ys)

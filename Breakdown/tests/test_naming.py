@@ -85,6 +85,35 @@ def test_ensure_device_dirs_creates_data_and_plots(tmp_path):
     assert dirs.plot_dir.endswith("plots")
 
 
+def test_reusing_a_device_allocates_an_isolated_rerun(tmp_path):
+    paths = N.SamplePaths(str(tmp_path), "2026-08-13", "waferB")
+    first = paths.allocate_device_run_dirs(5.0, 1)
+    with open(first.meta_file, "w", encoding="utf-8") as fh:
+        fh.write("original metadata")
+
+    second = paths.allocate_device_run_dirs(5.0, 1)
+
+    assert second.run_number == 2
+    assert second.device_dir.endswith("dev001\\reruns\\run002")
+    assert second.data_dir.endswith("run002\\data")
+    assert open(first.meta_file, encoding="utf-8").read() == "original metadata"
+
+
+def test_rerun_allocator_never_reuses_an_existing_rerun_directory(tmp_path):
+    paths = N.SamplePaths(str(tmp_path), "2026-08-13", "waferB")
+    first = paths.allocate_device_run_dirs(5.0, 1)
+    with open(first.meta_file, "w", encoding="utf-8") as fh:
+        fh.write("run one")
+    second = paths.allocate_device_run_dirs(5.0, 1)
+    with open(second.meta_file, "w", encoding="utf-8") as fh:
+        fh.write("run two")
+
+    third = paths.allocate_device_run_dirs(5.0, 1)
+
+    assert third.run_number == 3
+    assert third.device_dir.endswith("dev001\\reruns\\run003")
+
+
 # --- index scoping ---------------------------------------------------------
 
 def test_first_index_on_a_fresh_sample_is_one(tmp_path):

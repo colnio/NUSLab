@@ -51,8 +51,24 @@ class CvsVoltageContext:
     previous_voltage: Optional[float]
     #: Statistics-derived suggestion, with its reasoning and caveats.
     recommendation: Recommendation
+    #: Hard absolute limit enforced by both the UI and the session engine.
+    max_voltage_V: float = float("inf")
     #: The RVS results the recommendation was computed from, for display.
     records: List[VbdRecord] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RateLimitContext:
+    """A hardware-calibrated timing limitation that needs operator consent."""
+
+    device_index: int
+    stress_type: StressType
+    requested_rate_Vps: float
+    achievable_rate_Vps: float
+    point_period_s: float
+    max_step_V: float
+    requested_sample_interval_s: Optional[float] = None
+    achievable_sample_interval_s: Optional[float] = None
 
 
 @runtime_checkable
@@ -67,6 +83,9 @@ class Prompter(Protocol):
 
     def choose_stress_type(self, device_index: int) -> Optional[StressType]:
         """Only called in manual mode. None aborts the run."""
+
+    def confirm_rate_limit(self, ctx: RateLimitContext) -> bool:
+        """Confirm a calibrated rate limitation before destructive stress."""
 
 
 class SessionListener:

@@ -76,6 +76,16 @@ def test_writer_creates_missing_parent_directories(tmp_path):
     assert path.is_file()
 
 
+def test_writer_refuses_to_overwrite_an_existing_measurement(tmp_path):
+    path = tmp_path / "cv.csv"
+    path.write_text("irreplaceable data", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        S.MeasurementWriter(str(path), S.MFIA_COLUMNS)
+
+    assert path.read_text(encoding="utf-8") == "irreplaceable data"
+
+
 # --- SummaryWriter ---------------------------------------------------------
 
 def test_summary_writes_a_header_then_the_row(tmp_path):
@@ -109,6 +119,14 @@ def test_summary_rejects_an_unknown_column(tmp_path):
     path = tmp_path / "summary.csv"
     with pytest.raises(ValueError):
         S.SummaryWriter(str(path)).append({"nonsense": 1})
+
+
+def test_summary_rejects_an_incompatible_existing_header(tmp_path):
+    path = tmp_path / "summary.csv"
+    path.write_text("old,column\n1,2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="incompatible"):
+        S.SummaryWriter(str(path))
 
 
 # --- device metadata -------------------------------------------------------

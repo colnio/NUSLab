@@ -17,12 +17,14 @@ KeithleyGUI apps use, because these get opened directly in analysis notebooks.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import os.path as op
+import tempfile
 from typing import Any, Dict, Optional, Sequence
 
 from . import _paths  # noqa: F401  (puts KeithleyGUI on sys.path)
-from KeithleyGUI.ui_helpers import ensure_directory, write_json_file
+from KeithleyGUI.ui_helpers import ensure_directory
 
 #: Columns for a C(f) or C(V) sweep.
 MFIA_COLUMNS: Sequence[str] = (
@@ -111,7 +113,15 @@ class MeasurementWriter:
         parent = op.dirname(self.path)
         if parent:
             ensure_directory(parent, "measurement output")
-        self._fh = open(self.path, "w", newline="", encoding="utf-8")
+        try:
+            # A measurement is destructive and cannot be repeated after the
+            # device fails. Never truncate an existing file, even if a path
+            # allocation bug or timestamp collision reaches this final layer.
+            self._fh = open(self.path, "x", newline="", encoding="utf-8")
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"Refusing to overwrite existing measurement file: {self.path}"
+            ) from exc
         self._writer = csv.DictWriter(
             self._fh, fieldnames=self.columns, extrasaction="raise"
         )
@@ -150,6 +160,21 @@ class SummaryWriter:
     def __init__(self, path: str, columns: Sequence[str] = SUMMARY_COLUMNS):
         self.path = str(path)
         self.columns = list(columns)
+        self._validate_existing_header()
+
+    def _validate_existing_header(self) -> None:
+        if not op.isfile(self.path) or os.path.getsize(self.path) == 0:
+            return
+        try:
+            with open(self.path, newline="", encoding="utf-8-sig") as fh:
+                header = next(csv.reader(fh), [])
+        except OSError as exc:
+            raise RuntimeError(f"Could not read existing summary: {self.path}") from exc
+        if header != self.columns:
+            raise ValueError(
+                "Existing summary header is incompatible; refusing to append to "
+                f"{self.path}.\nExpected: {self.columns}\nFound: {header}"
+            )
 
     def append(self, row: Dict[str, Any]) -> None:
         unknown = set(row) - set(self.columns)
@@ -168,7 +193,50 @@ class SummaryWriter:
 
 
 def write_device_meta(path: str, payload: Dict[str, Any]) -> str:
-    return write_json_file(path, payload, label="device metadata")
+    return write_json_atomic(path, payload, label="device metadata")
+
+
+def write_json_atomic(path: str, payload: Dict[str, Any], label: str = "metadata") -> str:
+    """Durably replace a JSON file without exposing a partially-written file."""
+    path = str(path)
+    parent = op.dirname(path) or "."
+    ensure_directory(parent, f"{label} output")
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write {label} file:\n{path}\n\n{exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return path
+
+
+def read_summary_rows(path: str):
+    """Return summary rows plus non-fatal row warnings for campaign restoration."""
+    if not op.isfile(path) or os.path.getsize(path) == 0:
+        return [], []
+    warnings = []
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames != list(SUMMARY_COLUMNS):
+                raise ValueError(
+                    f"Existing summary header is incompatible: {reader.fieldnames}"
+                )
+            return list(reader), warnings
+    except Exception as exc:
+        warnings.append(f"Could not restore campaign history from {path}: {exc}")
+        return [], warnings
 
 
 def breakdown_field_MV_per_cm(

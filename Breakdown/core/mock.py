@@ -67,6 +67,7 @@ class MockSourceMeter:
         self.compliance_A = 1e-3
         self.nplc = 1.0
         self.current_autorange = False
+        self.source_delay_s = 0.0
         self.voltage = 0.0
         self.output_enabled = False
         self.closed = False
@@ -95,13 +96,15 @@ class MockSourceMeter:
     # -- SourceMeter protocol ----------------------------------------------
 
     def configure(
-        self, nplc: float, compliance_A: float, current_autorange: bool = False
+        self, nplc: float, compliance_A: float, current_autorange: bool = False,
+        source_delay_s: float = 0.0,
     ) -> None:
         if self.renew_on_configure:
             self.renew()
         self.nplc = float(nplc)
         self.compliance_A = float(compliance_A)
         self.current_autorange = bool(current_autorange)
+        self.source_delay_s = max(0.0, float(source_delay_s))
 
     def set_voltage(self, voltage: float) -> None:
         self.voltage = float(voltage)
@@ -182,12 +185,15 @@ class MockImpedanceAnalyzer:
         self.bias = 0.0
         self.amplitude = 0.05
         self.frequency = 1000.0
+        self.output_enabled = True
         self.model = 0
         self.configured = False
         self.closed = False
         self.safe_off_calls = 0
         self._previous_bias = 0.0
         self._direction = 1.0
+        self.bias_history: List[float] = []
+        self.bias_readback_tolerances: List[Optional[float]] = []
 
     # -- ImpedanceAnalyzer protocol ----------------------------------------
 
@@ -195,8 +201,12 @@ class MockImpedanceAnalyzer:
         self.configured = True
         self.model = int(getattr(mfia_params, "model", 0))
 
-    def set_bias(self, voltage: float) -> None:
+    def set_bias(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
         value = float(voltage)
+        self.bias_history.append(value)
+        self.bias_readback_tolerances.append(readback_tolerance_V)
         if value > self._previous_bias:
             self._direction = 1.0
         elif value < self._previous_bias:
@@ -204,8 +214,11 @@ class MockImpedanceAnalyzer:
         self._previous_bias = value
         self.bias = value
 
-    def set_amplitude(self, voltage: float) -> None:
+    def set_amplitude(
+        self, voltage: float, readback_tolerance_V: Optional[float] = None
+    ) -> None:
         self.amplitude = float(voltage)
+        self.output_enabled = True
 
     def set_frequency(self, frequency_hz: float) -> None:
         self.frequency = float(frequency_hz)
@@ -227,9 +240,12 @@ class MockImpedanceAnalyzer:
     def safe_off(self) -> None:
         self.safe_off_calls += 1
         self.bias = 0.0
-        self.amplitude = 0.0
+        self.amplitude = 0.010
+        self.frequency = 100_000.0
+        self.output_enabled = True
 
     def close(self) -> None:
+        self.safe_off()
         self.closed = True
 
     # -- simulation ---------------------------------------------------------

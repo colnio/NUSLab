@@ -177,3 +177,24 @@ def test_unknown_run_mode_is_rejected():
     errors = P.validate(p)
 
     assert any("mode" in e for e in errors)
+
+
+def test_non_finite_numeric_parameters_are_rejected():
+    p = P.BreakdownParams()
+    p.rvs.v_max = float("nan")
+
+    assert any("finite" in error for error in P.validate(p))
+
+
+def test_negative_source_delay_is_rejected():
+    p = P.BreakdownParams()
+    p.rvs.source_delay_s = -0.1
+
+    assert any("source_delay" in error for error in P.validate(p))
+
+
+def test_empty_sample_name_is_rejected():
+    p = P.BreakdownParams()
+    p.sample.sample_name = "   "
+
+    assert any("sample_name" in error for error in P.validate(p))

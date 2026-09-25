@@ -1,6 +1,7 @@
 import pytest
 
 from Breakdown.core import mfia_nodes as N
+from Breakdown.core import mfia as M
 
 SAMPLE_PATH = "/dev3519/imps/0/sample"
 
@@ -167,3 +168,237 @@ def test_the_node_paths_that_were_seen_are_reported_for_diagnostics():
 
     assert sample is None
     assert "/dev3519/demods/0/sample" in seen
+
+
+def test_a_critical_frequency_setting_fails_after_two_verified_attempts():
+    class RejectingDaq:
+        def __init__(self):
+            self.calls = 0
+
+        def setDouble(self, _path, _value):
+            self.calls += 1
+            raise RuntimeError("unsupported")
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = RejectingDaq()
+    session.dev = "dev3519"
+
+    with pytest.raises(RuntimeError, match="after two attempts"):
+        session.set_frequency(1000.0)
+
+    assert session.daq.calls == 8  # four aliases, two complete attempts
+
+
+def test_quantized_amplitude_readback_is_accepted():
+    class QuantizingDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            # Actual MFIA readback observed for a requested 50 mV amplitude.
+            return 0.050048828125
+
+        def getInt(self, _path):
+            raise RuntimeError("not an integer node")
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = QuantizingDaq()
+    session.dev = "dev3519"
+
+    session.set_amplitude(0.05)
+
+    assert session._last["amplitude"] == pytest.approx(0.05)
+
+
+def test_materially_wrong_amplitude_readback_is_rejected():
+    class WrongReadbackDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            return 0.06
+
+        def getInt(self, _path):
+            raise RuntimeError("not an integer node")
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = WrongReadbackDaq()
+    session.dev = "dev3519"
+
+    with pytest.raises(RuntimeError, match="no amplitude readback matched"):
+        session.set_amplitude(0.05)
+
+
+def test_idle_amplitude_can_allow_sub_millivolt_quantization():
+    class QuantizingDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            return 0.0105
+
+        def getInt(self, _path):
+            raise RuntimeError("not an integer node")
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = QuantizingDaq()
+    session.dev = "dev3519"
+
+    session.set_amplitude(0.010, readback_tolerance_V=0.001)
+
+    assert session._last["amplitude"] == pytest.approx(0.010)
+
+
+@pytest.mark.parametrize(
+    ("requested", "readback"),
+    [
+        (0.006, 0.006103515625),
+        (0.078, 0.078125),
+    ],
+)
+def test_quantized_bias_readback_is_accepted(requested, readback):
+    class QuantizingDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            return readback
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = QuantizingDaq()
+    session.dev = "dev3519"
+    session.ramp_wait = 0.0
+
+    session.set_bias(requested)
+
+    assert session._last["bias"] == pytest.approx(requested)
+
+
+def test_materially_wrong_bias_readback_is_rejected():
+    class WrongReadbackDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            return 0.007
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = WrongReadbackDaq()
+    session.dev = "dev3519"
+    session.ramp_wait = 0.0
+
+    with pytest.raises(RuntimeError, match="readback was 0.007"):
+        session.set_bias(0.006)
+
+
+def test_cv_point_spacing_can_relax_bias_readback_validation():
+    class ShiftedReadbackDaq:
+        def setDouble(self, _path, _value):
+            pass
+
+        def getDouble(self, _path):
+            return 0.007
+
+        def sync(self):
+            pass
+
+    session = M.MfiaSession("host", 8004)
+    session.daq = ShiftedReadbackDaq()
+    session.dev = "dev3519"
+    session.ramp_wait = 0.0
+
+    session.set_bias(0.006, readback_tolerance_V=0.003)
+
+    assert session._last["bias"] == pytest.approx(0.006)
+
+
+class RecordingSettingsDaq:
+    def __init__(self):
+        self.doubles = {}
+        self.ints = {}
+        self.double_writes = []
+        self.int_writes = []
+
+    def setDouble(self, path, value):
+        self.doubles[path] = float(value)
+        self.double_writes.append((path, float(value)))
+
+    def getDouble(self, path):
+        return self.doubles.get(path, 0.0)
+
+    def setInt(self, path, value):
+        self.ints[path] = int(value)
+        self.int_writes.append((path, int(value)))
+
+    def getInt(self, path):
+        return self.ints.get(path, 0)
+
+    def sync(self):
+        pass
+
+
+def test_mfia_safe_state_keeps_the_requested_idle_output_enabled():
+    daq = RecordingSettingsDaq()
+    session = M.MfiaSession("host", 8004)
+    session.daq = daq
+    session.dev = "dev3519"
+    session.ramp_wait = 0.0
+
+    session.safe_off()
+
+    assert daq.doubles["/dev3519/imps/0/bias/value"] == pytest.approx(0.0)
+    assert daq.doubles["/dev3519/imps/0/freq"] == pytest.approx(100_000.0)
+    assert daq.doubles["/dev3519/imps/0/drive"] == pytest.approx(0.010)
+    assert daq.ints["/dev3519/imps/0/enable"] == 1
+    assert daq.ints["/dev3519/imps/0/bias/enable"] == 1
+    assert ("/dev3519/imps/0/enable", 0) not in daq.int_writes
+    assert ("/dev3519/imps/0/bias/enable", 0) not in daq.int_writes
+    assert daq.ints["/dev3519/sigouts/0/enables/0"] == 1
+
+
+def test_close_overrides_the_old_snapshot_with_the_requested_idle_state():
+    daq = RecordingSettingsDaq()
+    session = M.MfiaSession("host", 8004)
+    session.daq = daq
+    session.dev = "dev3519"
+    session.ramp_wait = 0.0
+    session._snapshot = M.StateSnapshot(
+        int_nodes={
+            "/dev3519/imps/0/enable": 0,
+            "/dev3519/imps/0/bias/enable": 0,
+        },
+        double_nodes={
+            "/dev3519/imps/0/bias/value": 1.0,
+            "/dev3519/imps/0/freq": 1_000.0,
+            "/dev3519/imps/0/drive": 0.05,
+        },
+    )
+
+    session.close()
+
+    assert session.daq is None
+    assert daq.doubles["/dev3519/imps/0/bias/value"] == pytest.approx(0.0)
+    assert daq.doubles["/dev3519/imps/0/freq"] == pytest.approx(100_000.0)
+    assert daq.doubles["/dev3519/imps/0/drive"] == pytest.approx(0.010)
+    assert daq.ints["/dev3519/imps/0/enable"] == 1
+    assert daq.ints["/dev3519/imps/0/bias/enable"] == 1
+    assert ("/dev3519/imps/0/enable", 0) not in daq.int_writes
+    assert ("/dev3519/imps/0/bias/enable", 0) not in daq.int_writes

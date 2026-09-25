@@ -15,11 +15,12 @@ note about what was ignored.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import _paths  # noqa: F401  (puts KeithleyGUI on sys.path)
-from KeithleyGUI.ui_helpers import write_json_file
+from .storage import write_json_atomic
 
 #: Bumped whenever the on-disk layout changes incompatibly.
 SCHEMA_VERSION = 1
@@ -208,6 +209,13 @@ def _coerce(value: Any, template: Any) -> Any:
     if template is None or value is None:
         return value
     if isinstance(template, bool):
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+            raise ValueError(f"invalid boolean {value!r}")
         return bool(value)
     if isinstance(template, int) and not isinstance(template, bool):
         return int(value)
@@ -259,7 +267,7 @@ def from_dict(payload: Dict[str, Any]) -> LoadResult:
 
 
 def save_params(path: str, params: BreakdownParams) -> str:
-    return write_json_file(path, to_dict(params), label="parameters")
+    return write_json_atomic(path, to_dict(params), label="parameters")
 
 
 def load_params(path: str) -> LoadResult:
@@ -282,6 +290,14 @@ def validate(params: BreakdownParams) -> List[str]:
     make a measurement impossible, or silently produce meaningless data.
     """
     errors: List[str] = []
+    for section_name in _SECTIONS:
+        section = getattr(params, section_name)
+        for spec in fields(section):
+            value = getattr(section, spec.name)
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if not math.isfinite(float(value)):
+                errors.append(f"{section_name}.{spec.name} must be finite.")
     errors += _validate_sample(params)
     errors += _validate_stress(params)
     errors += _validate_mfia_sweeps(params)
@@ -291,6 +307,8 @@ def validate(params: BreakdownParams) -> List[str]:
 
 def _validate_sample(p: BreakdownParams) -> List[str]:
     errors = []
+    if not str(p.sample.sample_name).strip():
+        errors.append("Sample: sample_name cannot be empty.")
     if p.sample.crosspoint_um <= 0:
         errors.append("Sample: crosspoint_um must be greater than 0.")
     if p.sample.thickness_nm is not None and p.sample.thickness_nm <= 0:
@@ -316,6 +334,10 @@ def _validate_stress(p: BreakdownParams) -> List[str]:
         errors.append("RVS: max_step_V must be greater than 0.")
     if p.rvs.nplc <= 0:
         errors.append("RVS: nplc must be greater than 0.")
+    if p.rvs.source_delay_s < 0:
+        errors.append("RVS: source_delay_s cannot be negative.")
+    if p.rvs.compliance_A <= 0:
+        errors.append("RVS: compliance_A must be greater than 0.")
 
     # The compliance limit clamps the current, so a breakdown threshold at or
     # above it can never be reached -- the run would ramp to v_max every time
@@ -343,6 +365,8 @@ def _validate_stress(p: BreakdownParams) -> List[str]:
         errors.append("CVS: pre_ramp_rate_Vps must be greater than 0.")
     if p.cvs.nplc <= 0:
         errors.append("CVS: nplc must be greater than 0.")
+    if p.cvs.compliance_A <= 0:
+        errors.append("CVS: compliance_A must be greater than 0.")
 
     return errors
 
@@ -351,6 +375,25 @@ def _validate_mfia_sweeps(p: BreakdownParams) -> List[str]:
     errors = []
     limit = p.mfia.bias_limit_V
     wiring = "4-terminal" if p.mfia.four_terminal else "2-terminal"
+
+    if not 1 <= p.mfia.port <= 65535:
+        errors.append("MFIA: port must be between 1 and 65535.")
+    if p.mfia.imps < 0:
+        errors.append("MFIA: imps must be zero or greater.")
+    if p.mfia.model not in range(8):
+        errors.append("MFIA: model must be one of the supported values 0 through 7.")
+    if p.mfia.quality not in (0, 1, 2, 3):
+        errors.append("MFIA: quality must be between 0 and 3.")
+    if p.mfia.inputrange_mode not in (0, 1, 2):
+        errors.append("MFIA: inputrange_mode must be Manual, Auto, or Zone.")
+    if p.mfia.manual_current_range <= 0:
+        errors.append("MFIA: manual_current_range must be greater than 0.")
+    if p.mfia.demod_order < 1:
+        errors.append("MFIA: demod_order must be at least 1.")
+    if p.mfia.demod_timeconstant <= 0 or p.mfia.demod_rate <= 0:
+        errors.append("MFIA: demod_timeconstant and demod_rate must be greater than 0.")
+    if p.mfia.ramp_step <= 0 or p.mfia.ramp_wait < 0:
+        errors.append("MFIA: ramp_step must be positive and ramp_wait cannot be negative.")
 
     if p.cf.f_min <= 0:
         errors.append("C(F): f_min must be greater than 0 for a log sweep.")

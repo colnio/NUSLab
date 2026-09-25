@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from Breakdown.core.smu import OVERFLOW_SENTINEL, _parse_reading
+from Breakdown.core.smu import OVERFLOW_SENTINEL, SmuSession, _parse_reading
 
 
 def test_a_voltage_current_pair_is_split_in_order():
@@ -65,3 +65,46 @@ def test_a_negative_current_keeps_its_sign():
     _, current = _parse_reading("-2.0,-1.5e-6")
 
     assert current == pytest.approx(-1.5e-6)
+
+
+def test_safe_off_attempts_output_off_even_when_zeroing_fails():
+    class Device:
+        def __init__(self):
+            self.disabled = False
+
+        def set_voltage(self, _value):
+            raise RuntimeError("write failed")
+
+        def disable_output(self):
+            self.disabled = True
+
+    session = SmuSession("test")
+    session.device = Device()
+
+    with pytest.raises(RuntimeError, match="zero failed"):
+        session.safe_off()
+
+    assert session.device.disabled
+
+
+def test_critical_smu_setting_is_retried_after_bad_readback():
+    class Resource:
+        def __init__(self):
+            self.queries = 0
+
+        def write(self, command):
+            if command.endswith("?"):
+                self.queries += 1
+
+        def read(self):
+            return "0" if self.queries == 1 else "1"
+
+    session = SmuSession("test")
+    session.resource = Resource()
+    actions = []
+
+    session._apply_verified_number(
+        lambda: actions.append(True), ":TEST?", 1.0, "test setting"
+    )
+
+    assert len(actions) == 2

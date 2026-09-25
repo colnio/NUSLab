@@ -229,6 +229,80 @@ def test_rvs_configures_compliance_and_integration_before_sourcing():
     assert smu.nplc == pytest.approx(0.5)
 
 
+def test_rvs_configures_the_source_delay():
+    smu = MockSourceMeter(v_bd=50.0)
+
+    run_rvs(smu, rvs_params(v_max=0.2, source_delay_s=0.007))
+
+    assert smu.source_delay_s == pytest.approx(0.007)
+
+
+def test_a_transient_invalid_read_is_retried_once():
+    class FlakySmu(MockSourceMeter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+
+        def read_vi(self):
+            self.calls += 1
+            if self.calls == 1:
+                return self.voltage, float("nan")
+            return super().read_vi()
+
+    smu = FlakySmu(v_bd=50.0)
+    result = run_rvs(smu, rvs_params(v_max=0.2))
+
+    assert result.point_count > 0
+    assert smu.calls == result.point_count + 1
+
+
+def test_two_invalid_reads_abort_and_leave_the_smu_safe():
+    class InvalidSmu(MockSourceMeter):
+        def read_vi(self):
+            return self.voltage, float("nan")
+
+    smu = InvalidSmu(v_bd=50.0)
+
+    with pytest.raises(RuntimeError, match="failed twice"):
+        run_rvs(smu, rvs_params(v_max=0.2))
+
+    assert smu.voltage == 0.0 and not smu.output_enabled
+
+
+def test_hardware_latency_calibrates_the_ramp_plan():
+    clock = FakeClock()
+
+    class LatencySmu(MockSourceMeter):
+        def read_vi(self):
+            clock.sleep(0.12)
+            return super().read_vi()
+
+    smu = LatencySmu(v_bd=50.0, clock=clock)
+    period = ST.calibrate_smu_point_period(
+        smu, nplc=1.0, compliance_A=1e-3,
+        current_autorange=False, clock=clock,
+    )
+    plan = ST.plan_for_calibrated_period(
+        rate_Vps=1.0, max_step_V=0.05, nplc=1.0,
+        source_delay_s=0.0, calibrated_period_s=period,
+    )
+
+    assert period == pytest.approx(0.12)
+    assert plan.rate_limited
+    assert plan.achievable_rate_Vps == pytest.approx(0.05 / 0.12)
+
+
+def test_rvs_uses_measured_voltage_for_breakdown():
+    class OffsetVoltageSmu(MockSourceMeter):
+        def read_vi(self):
+            _voltage, current = super().read_vi()
+            return self.voltage - 0.01, current
+
+    result = run_rvs(OffsetVoltageSmu(v_bd=2.0), rvs_params())
+
+    assert result.v_bd < 2.0
+
+
 def test_the_instrument_is_left_safe_even_if_a_reading_raises():
     class ExplodingSmu(MockSourceMeter):
         def read_vi(self):
@@ -356,3 +430,28 @@ def test_cvs_elapsed_time_advances_across_the_hold():
 
     assert hold == sorted(hold)
     assert hold[-1] > hold[0]
+
+
+def test_a_preramp_excursion_does_not_start_the_hold_detector():
+    class BoundaryExcursionSmu(MockSourceMeter):
+        def __init__(self):
+            super().__init__(v_bd=50.0)
+            self.at_top = 0
+
+        def read_vi(self):
+            voltage, _current = super().read_vi()
+            if abs(voltage) >= 0.01 - 1e-12:
+                self.at_top += 1
+                current = 1e-3 if self.at_top <= 2 else 1e-9
+            else:
+                current = 1e-9
+            return voltage, current
+
+    result = run_cvs(
+        BoundaryExcursionSmu(),
+        cvs_params(sample_interval_s=0.05, max_duration_s=0.11),
+        v_stress=0.01,
+    )
+
+    assert not result.bd_detected
+    assert result.termination_reason == Termination.DURATION_REACHED

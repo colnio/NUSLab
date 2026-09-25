@@ -17,6 +17,7 @@ between them.
 from __future__ import annotations
 
 import datetime as dt
+import copy
 import os
 import threading
 import traceback
@@ -28,6 +29,7 @@ matplotlib.use("Agg")
 
 from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -50,6 +52,7 @@ from Breakdown.core.events import (
     CvsVoltageContext,
     Instrument,
     Phase,
+    RateLimitContext,
     SessionListener,
     StressType,
 )
@@ -62,15 +65,15 @@ from .dialogs import CVS_GUIDANCE, CableSwapDialog, CvsVoltageDialog, StressType
 from .panels import ParamsPanel
 from .plots import PlotPanel
 from .theme import (
-    BORDER,
-    GO,
-    SURFACE,
-    TEXT_DIM,
-    WAIT,
+    DARK_MODE,
+    LIGHT_MODE,
     Card,
+    apply_theme,
+    current_theme,
     field_row,
     monospace,
     state_chip_style,
+    theme_colors,
 )
 
 PLOT_REFRESH_MS = 100
@@ -81,6 +84,7 @@ class QtPrompter(QObject):
 
     swap_requested = pyqtSignal(object, int)
     cvs_requested = pyqtSignal(object)
+    rate_limit_requested = pyqtSignal(object)
     stress_type_requested = pyqtSignal(int, bool)
 
     def __init__(self, should_stop):
@@ -125,6 +129,9 @@ class QtPrompter(QObject):
         return self._ask(
             lambda: self.stress_type_requested.emit(device_index, can_cvs)
         )
+
+    def confirm_rate_limit(self, ctx: RateLimitContext) -> bool:
+        return bool(self._ask(lambda: self.rate_limit_requested.emit(ctx)))
 
     #: Replaced by the worker once the session exists.
     def _can_run_cvs(self, device_index: int) -> bool:
@@ -196,7 +203,7 @@ class SessionWorker(QObject):
                  mfia_selection: str, prompter: QtPrompter,
                  start_index: Optional[int] = None):
         super().__init__()
-        self.params = params
+        self.params = copy.deepcopy(params)
         self.smu_selection = smu_selection
         self.mfia_selection = mfia_selection
         self.prompter = prompter
@@ -205,6 +212,7 @@ class SessionWorker(QObject):
         self._stop = False
         self.session: Optional[BreakdownSession] = None
         self._log_handle = None
+        self._log_error = None
 
     def stop_requested(self) -> bool:
         return self._stop
@@ -229,6 +237,8 @@ class SessionWorker(QObject):
             timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             date = dt.datetime.now().strftime("%Y-%m-%d")
             self._open_log(date, timestamp)
+            if self._log_error is not None:
+                self.log.emit(f"Warning: run log is unavailable: {self._log_error}")
 
             self.log.emit(f"Opening MFIA ({self.mfia_selection}) ...")
             mfia = mfia_module.open_impedance_analyzer(
@@ -263,9 +273,12 @@ class SessionWorker(QObject):
                     continue
                 try:
                     instrument.safe_off()
+                except Exception as exc:
+                    self.log.emit(f"Warning: safe-state cleanup failed: {exc}")
+                try:
                     instrument.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self.log.emit(f"Warning: instrument close failed: {exc}")
             self._close_log()
 
     # -- run log ------------------------------------------------------------
@@ -280,6 +293,7 @@ class SessionWorker(QObject):
             self.log.connect(self._write_log)
         except Exception:
             self._log_handle = None
+            self._log_error = traceback.format_exc().strip()
 
     def _write_log(self, message: str) -> None:
         if self._log_handle is None:
@@ -295,11 +309,15 @@ class SessionWorker(QObject):
 
 
 class BreakdownWindow(QWidget):
-    def __init__(self):
+    def __init__(self, settings=None):
         super().__init__()
         self.setWindowTitle("Crosspoint Breakdown Characterization")
         self.resize(1280, 860)
 
+        self._settings = settings
+        self._theme_name = current_theme()
+        self._state_kind = "idle"
+        self._state_text = "Idle"
         self.params = BreakdownParams()
         self.worker: Optional[SessionWorker] = None
         self.thread: Optional[QThread] = None
@@ -345,13 +363,7 @@ class BreakdownWindow(QWidget):
         signal -- amber means a prompt is open, red means a device is energised.
         """
         bar = QWidget()
-        # Scoped by object name: a bare `background:` here would cascade into
-        # every child and repaint the Start/Stop buttons out of existence.
         bar.setObjectName("HeaderBar")
-        bar.setStyleSheet(
-            f"QWidget#HeaderBar {{ background: {SURFACE};"
-            f" border-bottom: 1px solid {BORDER}; }}"
-        )
         row = QHBoxLayout(bar)
         row.setContentsMargins(18, 11, 18, 11)
         row.setSpacing(26)
@@ -366,6 +378,10 @@ class BreakdownWindow(QWidget):
         self.header_detail = self._header_item(row, "LAST RESULT", "—")
         row.addStretch(1)
 
+        self.theme_button = QPushButton()
+        self.theme_button.setAccessibleName("Toggle color theme")
+        self.theme_button.clicked.connect(self._toggle_theme)
+        self._refresh_theme_button()
         self.start_button = QPushButton("Start run")
         self.start_button.setObjectName("StartButton")
         self.start_button.clicked.connect(self._start)
@@ -373,6 +389,7 @@ class BreakdownWindow(QWidget):
         self.stop_button.setObjectName("StopButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._stop)
+        row.addWidget(self.theme_button)
         row.addWidget(self.start_button)
         row.addWidget(self.stop_button)
         return bar
@@ -471,7 +488,7 @@ class BreakdownWindow(QWidget):
             "5  ⏸  reconnect the probes to the MFIA\n"
             "6  write the summary row, advance the index"
         )
-        steps.setStyleSheet(f"color: {TEXT_DIM}; line-height: 160%;")
+        steps.setObjectName("MutedText")
         sequence.add(steps)
         right.addWidget(sequence)
         right.addStretch(1)
@@ -561,11 +578,32 @@ class BreakdownWindow(QWidget):
     # -- run state ----------------------------------------------------------
 
     def _set_state(self, kind: str, text: str) -> None:
+        self._state_kind = kind
+        self._state_text = text
         self.state_chip.setText(text.upper())
         self.state_chip.setStyleSheet(
             "font-size: 11px; font-weight: 700; letter-spacing: 1.4px;"
             "padding: 5px 12px; border-radius: 4px;" + state_chip_style(kind)
         )
+
+    def _refresh_theme_button(self) -> None:
+        next_name = "Light" if self._theme_name == DARK_MODE else "Dark"
+        self.theme_button.setText(f"{next_name} mode")
+        self.theme_button.setToolTip(f"Switch to {next_name.lower()} mode")
+
+    def _toggle_theme(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        next_theme = LIGHT_MODE if self._theme_name == DARK_MODE else DARK_MODE
+        self._theme_name = apply_theme(app, next_theme)
+        if self._settings is not None:
+            self._settings.setValue("appearance/theme", self._theme_name)
+            self._settings.sync()
+        self._refresh_theme_button()
+        self._set_state(self._state_kind, self._state_text)
+        self._update_ramp_preview()
+        self.plots.apply_theme(self._theme_name)
 
     # -- setup actions ------------------------------------------------------
 
@@ -622,7 +660,8 @@ class BreakdownWindow(QWidget):
                          rvs.source_delay_s)
         estimate = abs(rvs.v_max) / plan.achievable_rate_Vps \
             if plan.achievable_rate_Vps else 0.0
-        colour = WAIT if plan.rate_limited else GO
+        colours = theme_colors(self._theme_name)
+        colour = colours.wait if plan.rate_limited else colours.go
         headline = (f"{plan.achievable_rate_Vps:.3g} V/s"
                     if not plan.rate_limited
                     else f"{plan.achievable_rate_Vps:.3g} V/s "
@@ -630,11 +669,11 @@ class BreakdownWindow(QWidget):
         self.ramp_preview.setText(
             f"<div style='font-size:22px;color:{colour};font-weight:600'>"
             f"{headline}</div>"
-            f"<div style='color:{TEXT_DIM};margin-top:6px'>"
+            f"<div style='color:{colours.text_dim};margin-top:6px'>"
             f"{plan.step_V:.4g} V steps every {plan.dwell_s * 1e3:.1f} ms &nbsp;·&nbsp; "
             f"{abs(rvs.v_max) / plan.step_V:.0f} points to {abs(rvs.v_max):g} V "
             f"&nbsp;·&nbsp; {estimate:.1f} s if it survives</div>"
-            + (f"<div style='color:{WAIT};margin-top:8px'>{plan.note}</div>"
+            + (f"<div style='color:{colours.wait};margin-top:8px'>{plan.note}</div>"
                if plan.rate_limited else "")
         )
 
@@ -701,6 +740,7 @@ class BreakdownWindow(QWidget):
                                    and self.worker.stop_requested())
         self.prompter.swap_requested.connect(self._on_swap_requested)
         self.prompter.cvs_requested.connect(self._on_cvs_requested)
+        self.prompter.rate_limit_requested.connect(self._on_rate_limit_requested)
         self.prompter.stress_type_requested.connect(self._on_stress_type_requested)
 
         self.worker = SessionWorker(
@@ -729,6 +769,8 @@ class BreakdownWindow(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.progress.setVisible(True)
+        self.tabs.setTabEnabled(0, False)
+        self.tabs.setTabEnabled(1, False)
         self._set_state("measuring", "Running")
         self.tabs.setCurrentIndex(2)
         self.thread.start()
@@ -752,6 +794,8 @@ class BreakdownWindow(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.progress.setVisible(False)
+        self.tabs.setTabEnabled(0, True)
+        self.tabs.setTabEnabled(1, True)
         self._update_index_label()
 
     # -- prompt handlers (GUI thread) ---------------------------------------
@@ -775,6 +819,33 @@ class BreakdownWindow(QWidget):
         self._run_dialog(CvsVoltageDialog(ctx, self),
                          lambda d: d.selected_voltage())
 
+    @pyqtSlot(object)
+    def _on_rate_limit_requested(self, ctx: RateLimitContext) -> None:
+        details = (
+            f"Requested {ctx.stress_type.value} approach rate: "
+            f"{ctx.requested_rate_Vps:g} V/s\n"
+            f"Calibrated achievable rate: {ctx.achievable_rate_Vps:.4g} V/s\n"
+            f"Measured read cycle: {ctx.point_period_s * 1e3:.1f} ms\n"
+            f"Maximum step: {ctx.max_step_V:g} V"
+        )
+        if ctx.requested_sample_interval_s is not None:
+            details += (
+                f"\n\nRequested CVS sample interval: "
+                f"{ctx.requested_sample_interval_s:g} s\n"
+                f"Achievable interval: {ctx.achievable_sample_interval_s:g} s"
+            )
+        box = QMessageBox(QMessageBox.Warning, "Hardware timing limit",
+                          details + "\n\nContinue with the calibrated timing?",
+                          QMessageBox.Yes | QMessageBox.No, self)
+        box.setDefaultButton(QMessageBox.No)
+        self._open_dialog = box
+        try:
+            accepted = box.exec_() == QMessageBox.Yes
+        finally:
+            self._open_dialog = None
+        if self.prompter is not None:
+            self.prompter.deliver(accepted)
+
     @pyqtSlot(int, bool)
     def _on_stress_type_requested(self, device_index: int, can_cvs: bool) -> None:
         self._run_dialog(StressTypeDialog(device_index, can_cvs, self),
@@ -790,6 +861,11 @@ class BreakdownWindow(QWidget):
     def _on_device_started(self, index: int, size: float) -> None:
         self.plots.reset_device()
         self.progress_label.setText(f"Device {index}  ({size:g} um)")
+        # The header is explicitly labelled NEXT DEVICE. Once device ``index``
+        # starts, its successor is the next device even while the current phase
+        # is still running. Previously this retained the pre-run value forever,
+        # producing displays such as "CF device 7" beside "Next device 6".
+        self.header_device.setText(str(index + 1))
 
     @pyqtSlot(str, int)
     def _on_phase_started(self, phase: str, index: int) -> None:
@@ -827,8 +903,9 @@ class BreakdownWindow(QWidget):
         if self.thread is not None and self.thread.isRunning():
             QMessageBox.warning(
                 self, "Run in progress",
-                "Stop the run before closing, so both instruments are driven "
-                "to zero and their outputs opened.",
+                "Stop the run before closing so the Keithley is driven to 0 V "
+                "and switched off, and the MFIA is returned to its enabled "
+                "10 mV, 0 V bias, 100 kHz idle state.",
             )
             self._stop()
             event.ignore()

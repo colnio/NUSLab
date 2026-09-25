@@ -158,6 +158,38 @@ def test_the_bias_is_returned_to_zero_even_if_a_read_raises():
     assert analyzer.bias == pytest.approx(0.0)
 
 
+def test_an_invalid_mfia_payload_is_retried_once():
+    class FlakyAnalyzer(MockImpedanceAnalyzer):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def read_sample(self):
+            self.reads += 1
+            if self.reads == 1:
+                return {"param0": float("nan")}
+            return super().read_sample()
+
+    analyzer = FlakyAnalyzer()
+    _, rows, _ = run_cf(analyzer=analyzer)
+
+    assert rows
+    assert analyzer.reads == len(rows) + 1
+
+
+def test_two_invalid_mfia_payloads_abort_the_sweep_safely():
+    class InvalidAnalyzer(MockImpedanceAnalyzer):
+        def read_sample(self):
+            return {"param0": float("nan")}
+
+    analyzer = InvalidAnalyzer()
+
+    with pytest.raises(RuntimeError, match="validation twice"):
+        run_cf(analyzer=analyzer, params=cf_params(bias_V=1.0))
+
+    assert analyzer.bias == pytest.approx(0.0)
+
+
 # --- C(V) ------------------------------------------------------------------
 
 def test_cv_sweep_measures_the_whole_hysteresis_loop():
@@ -230,3 +262,17 @@ def test_cv_sweep_sets_the_drive_amplitude():
     analyzer, _, _ = run_cv(params=cv_params(amplitude_V=0.02))
 
     assert analyzer.amplitude == pytest.approx(0.02)
+
+
+def test_cv_bias_tolerance_is_half_the_actual_local_point_spacing():
+    analyzer, _, _ = run_cv(
+        params=cv_params(v_min=-0.3, v_max=0.3, points=51)
+    )
+    measured = list(zip(
+        analyzer.bias_history[:-1],
+        analyzer.bias_readback_tolerances[:-1],
+    ))
+    _, tolerance = min(measured, key=lambda item: abs(item[0] - 0.078))
+
+    assert tolerance == pytest.approx(0.003)
+    assert analyzer.bias_readback_tolerances[-1] is None  # cleanup zero

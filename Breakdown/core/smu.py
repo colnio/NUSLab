@@ -84,6 +84,7 @@ class SmuSession:
                 f"Check the VISA connection and that no other program holds it."
             )
         if not isinstance(device, keithley.Keithley6430):
+            keithley.shutdown_device(device, close=True)
             raise RuntimeError(
                 f"{type(device).__name__} cannot source voltage and measure "
                 f"current; select a Keithley 2400 (or 6430)."
@@ -93,36 +94,89 @@ class SmuSession:
         self.resource = getattr(device, "device", None)
         self.model = type(device).__name__
         if self.resource is None:
+            keithley.shutdown_device(device, close=True)
+            self.device = None
             raise RuntimeError("Instrument VISA resource handle unavailable.")
         return self
 
     def close(self) -> None:
         if self.device is None:
             return
-        from KeithleyGUI import keithley
-
-        keithley.shutdown_device(self.device, close=True)
-        self.device = None
-        self.resource = None
+        try:
+            self.device.close()
+        finally:
+            self.device = None
+            self.resource = None
 
     # -- SourceMeter protocol ----------------------------------------------
 
     def configure(
-        self, nplc: float, compliance_A: float, current_autorange: bool = False
+        self, nplc: float, compliance_A: float, current_autorange: bool = False,
+        source_delay_s: float = 0.0,
     ) -> None:
         self.nplc = float(nplc)
         self.device.nplc = float(nplc)
-        self.device.set_source_mode("voltage")
-        self.resource.write(f":SENS:CURR:NPLC {float(nplc)}")
+        self._apply_verified_text(
+            lambda: self.device.set_source_mode("voltage"),
+            ":SOUR:FUNC?", lambda value: "VOLT" in value.upper(),
+            "voltage source mode",
+        )
+        self._apply_verified_number(
+            lambda: self.resource.write(f":SENS:CURR:NPLC {float(nplc)}"),
+            ":SENS:CURR:NPLC?", float(nplc), "current NPLC",
+        )
         # Sets both :SENS:CURR:PROT and :SENS:CURR:RANG. Pinning the range is
         # wanted here: autorange glitches mid-ramp would look like current steps.
-        self.device.set_compliance_current(compliance_A)
-        self.resource.write(
-            f":SENS:CURR:RANG:AUTO {'ON' if current_autorange else 'OFF'}"
+        self._apply_verified_number(
+            lambda: self.device.set_compliance_current(compliance_A),
+            ":SENS:CURR:PROT?", abs(float(compliance_A)), "current compliance",
         )
+        auto_value = 1.0 if current_autorange else 0.0
+        self._apply_verified_number(
+            lambda: self.resource.write(
+                f":SENS:CURR:RANG:AUTO {'ON' if current_autorange else 'OFF'}"
+            ),
+            ":SENS:CURR:RANG:AUTO?", auto_value, "current autorange",
+        )
+        self.set_source_delay(source_delay_s)
 
     def set_source_delay(self, seconds: float) -> None:
-        self.resource.write(f":SOUR:DEL {max(0.0, float(seconds))}")
+        value = max(0.0, float(seconds))
+        self._apply_verified_number(
+            lambda: self.resource.write(f":SOUR:DEL {value}"),
+            ":SOUR:DEL?", value, "source delay",
+        )
+
+    def _query_text(self, command: str) -> str:
+        self.resource.write(command)
+        return str(self.resource.read()).strip()
+
+    def _apply_verified_text(self, action, query, accepts, label: str) -> None:
+        last_error = None
+        for _attempt in range(2):
+            try:
+                action()
+                actual = self._query_text(query)
+                if accepts(actual):
+                    return
+                raise RuntimeError(f"readback was {actual!r}")
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(
+            f"Keithley rejected {label} after two attempts: {last_error}"
+        )
+
+    def _apply_verified_number(
+        self, action, query: str, expected: float, label: str
+    ) -> None:
+        def accepts(raw):
+            value = float(str(raw).strip().split(",")[0])
+            return math.isclose(
+                value, float(expected), rel_tol=1e-5,
+                abs_tol=max(1e-12, abs(float(expected)) * 1e-6),
+            )
+
+        self._apply_verified_text(action, query, accepts, label)
 
     def set_voltage(self, voltage: float) -> None:
         self.device.set_voltage(float(voltage))
@@ -135,12 +189,20 @@ class SmuSession:
         self.device.disable_output()
 
     def safe_off(self) -> None:
-        """Drive to zero and open the output. Must never raise."""
+        """Attempt zero and output-off independently, then report any failures."""
         if self.device is None:
             return
-        from KeithleyGUI import keithley
-
-        keithley.shutdown_device(self.device, close=False)
+        errors = []
+        try:
+            self.device.set_voltage(0.0)
+        except Exception as exc:
+            errors.append(f"zero failed: {exc}")
+        try:
+            self.device.disable_output()
+        except Exception as exc:
+            errors.append(f"output-off failed: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
 
 def open_source_meter(selection_text: str, nplc: float = 1.0):

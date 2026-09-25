@@ -68,9 +68,11 @@ class BreakdownDetector:
         if self._event is not None:
             return self._event
 
-        # A dropped or overflowed reading is neither evidence for breakdown nor
-        # evidence against it, so it leaves any run in progress untouched.
+        # A dropped or overflowed reading cannot bridge a "consecutive" run.
+        # The stress runner retries once and aborts if it remains invalid.
         if current is None or math.isnan(float(current)):
+            self._run_start = None
+            self._run_length = 0
             return None
 
         if abs(float(current)) < self.criterion.i_threshold_A:
